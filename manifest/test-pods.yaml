@@ -1,0 +1,28 @@
+---
+# Test pod on hub CUDN
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hub-test
+  namespace: cudn-hub-ns
+  labels:
+    app: cudn-test
+spec:
+  containers:
+  - name: test
+    image: quay.io/openshift/origin-network-tools:latest
+    command: ["sleep", "infinity"]
+---
+# Test pod on spoke CUDN
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spoke-test
+  namespace: cudn-spoke-ns
+  labels:
+    app: cudn-test
+spec:
+  containers:
+  - name: test
+    image: quay.io/openshift/origin-network-tools:latest
+    command: ["sleep", "infinity"]

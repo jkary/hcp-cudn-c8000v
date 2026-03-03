@@ -1,0 +1,41 @@
+---
+# FRRConfiguration for spoke cluster BGP peering with c8000v
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: spoke-bgp
+  namespace: openshift-frr-k8s
+spec:
+  bgp:
+    routers:
+    - asn: 64513
+      prefixes:
+      - 10.200.0.0/16
+      neighbors:
+      - address: 172.16.252.50
+        asn: 64514
+        disableMP: true
+        toReceive:
+          allowed:
+            mode: all
+        toAdvertise:
+          allowed:
+            mode: all
+---
+# RouteAdvertisements to bridge FRR-K8s routes into OVN for CUDN routing
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: spoke-cudn-routes
+spec:
+  advertisements:
+  - PodNetwork
+  networkSelectors:
+  - networkSelectionType: ClusterUserDefinedNetworks
+    clusterUserDefinedNetworkSelector:
+      networkSelector:
+        matchLabels:
+          advertise: "true"
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels: {}

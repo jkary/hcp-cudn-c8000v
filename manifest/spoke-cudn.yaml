@@ -1,0 +1,28 @@
+---
+# Namespace for spoke CUDN workloads
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cudn-spoke-ns
+  labels:
+    k8s.ovn.org/primary-user-defined-network: ""
+    cudn: spoke
+---
+# ClusterUserDefinedNetwork for spoke cluster
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: spoke-network
+  labels:
+    advertise: "true"
+spec:
+  namespaceSelector:
+    matchLabels:
+      cudn: spoke
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+      - cidr: 10.200.0.0/16
+        hostSubnet: 24
