@@ -1,0 +1,14 @@
+---
+# Kustomize overlay for Lab 01: CUDN supernets and BGP advertising.
+# Extends the common base and adds lab01-specific K8s resources.
+#
+# Apply with: oc apply -k lab01-cudn-bgp/manifest/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../common/manifest
+  - hub-cudn.yaml
+  - hub-bgp.yaml
+  - spoke-cudn.yaml
+  - spoke-bgp.yaml

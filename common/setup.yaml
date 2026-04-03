@@ -1,0 +1,204 @@
+---
+# Common infrastructure setup for CUDN lab series.
+#
+# This playbook prepares the c8000v router and both clusters for any lab:
+#   - Pushes base BGP config to c8000v
+#   - Enables FRR-K8s and RouteAdvertisements on hub and spoke clusters
+#
+# Run it with:
+#   ap common/setup.yaml
+#
+# Run individual phases:
+#   ap common/setup.yaml -t c8000v
+#   ap common/setup.yaml -t hub
+#   ap common/setup.yaml -t spoke
+
+- name: 'Configure c8000v base BGP'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Render and push BGP configuration to c8000v'
+      ansible.netcommon.cli_config:
+        config: "{{ lookup('template', playbook_dir + '/manifest/c8000v-bgp-base.cfg.j2') }}"
+
+    - name: 'Verify BGP is configured on c8000v'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp summary'
+      register: __bgp_summary
+
+    - name: 'Display BGP summary'
+      ansible.builtin.debug:
+        var: __bgp_summary.stdout_lines
+
+  tags: ['c8000v']
+
+- name: 'Hub cluster - Enable FRR and RouteAdvertisements'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Patch Network operator to enable FRR and route advertisements'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: operator.openshift.io/v1
+        kind: Network
+        name: cluster
+        definition:
+          spec:
+            additionalRoutingCapabilities:
+              providers:
+              - FRR
+            defaultNetwork:
+              ovnKubernetesConfig:
+                routeAdvertisements: Enabled
+
+    - name: 'Wait for network operator to stabilize'
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterOperator
+        name: network
+      register: __network_co
+      until: >
+        __network_co.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Available') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+      retries: 60
+      delay: 10
+
+    - name: 'Wait for FRR-K8s pods to be ready'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __frr_pods
+      until: >
+        __frr_pods.resources | length > 0 and
+        __frr_pods.resources |
+        selectattr('status.phase', 'equalto', 'Running') |
+        list | length == __frr_pods.resources | length
+      retries: 60
+      delay: 10
+
+  tags: ['hub']
+
+- name: 'Spoke cluster - Try enabling FRR via HostedCluster CR'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Try patching HostedCluster to enable FRR on spoke'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: hypershift.openshift.io/v1beta1
+        kind: HostedCluster
+        name: "{{ spoke_hcp_name }}"
+        namespace: "{{ spoke_hcp_namespace }}"
+        definition:
+          spec:
+            networking:
+              additionalRoutingCapabilities:
+                providers:
+                - FRR
+      register: __hc_patch
+      ignore_errors: true
+
+    - name: 'Display HostedCluster patch result'
+      ansible.builtin.debug:
+        msg: >-
+          HostedCluster patch {{ 'succeeded' if __hc_patch is succeeded else 'failed' }}.
+          {{ 'Will patch spoke Network operator directly.' if __hc_patch is failed else '' }}
+
+  tags: ['spoke']
+
+- name: 'Spoke cluster - Enable FRR and RouteAdvertisements'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Patch spoke Network operator to enable FRR and route advertisements'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: operator.openshift.io/v1
+        kind: Network
+        name: cluster
+        definition:
+          spec:
+            additionalRoutingCapabilities:
+              providers:
+              - FRR
+            defaultNetwork:
+              ovnKubernetesConfig:
+                routeAdvertisements: Enabled
+      register: __spoke_network_patch
+      until: __spoke_network_patch is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for spoke network operator to stabilize'
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterOperator
+        name: network
+      register: __spoke_network_co
+      until: >
+        __spoke_network_co.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Available') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+      retries: 60
+      delay: 10
+
+    - name: 'Wait for FRR-K8s pods on spoke'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __spoke_frr_pods
+      until: >
+        __spoke_frr_pods.resources | length > 0 and
+        __spoke_frr_pods.resources |
+        selectattr('status.phase', 'equalto', 'Running') |
+        list | length == __spoke_frr_pods.resources | length
+      retries: 60
+      delay: 10
+
+  tags: ['spoke']

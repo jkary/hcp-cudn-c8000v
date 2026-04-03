@@ -1,0 +1,37 @@
+---
+# Site-specific variables for the CUDN lab series.
+# Edit this file to match your environment before running any lab.
+
+# --- c8000v Router ---
+c8000v_host: '172.16.252.50'
+c8000v_user: 'admin'
+c8000v_password: 'admin123'
+c8000v_asn: 64514
+
+# --- Hub Cluster ---
+hub_kubeconfig: '/home/jkary/labs/hcp/deploy/auth/kubeconfig'
+hub_asn: 64512
+hub_cudn_cidr: '10.100.0.0/16'
+hub_host_subnet: 24
+hub_node_ips:
+  - '172.16.252.61'
+  - '172.16.252.62'
+  - '172.16.252.63'
+hub_node_descriptions:
+  - 'hub-master-0'
+  - 'hub-master-1'
+  - 'hub-master-2'
+
+# --- Spoke Cluster ---
+spoke_kubeconfig: '/home/jkary/labs/hcp/spoke/auth/kubeconfig'
+spoke_asn: 64513
+spoke_cudn_cidr: '10.200.0.0/16'
+spoke_host_subnet: 24
+spoke_node_ips:
+  - '172.16.252.64'
+spoke_node_descriptions:
+  - 'spoke-worker-1'
+
+# --- HCP (only relevant if spoke is a HostedCluster) ---
+spoke_hcp_name: 'spoke'
+spoke_hcp_namespace: 'spoke'

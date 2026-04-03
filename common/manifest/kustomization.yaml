@@ -1,0 +1,8 @@
+---
+# Kustomize base for the CUDN lab series.
+# This base contains no resources — it serves as the anchor point for per-lab overlays.
+# Site-specific values live in vars.yaml (consumed by Ansible playbooks).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources: []

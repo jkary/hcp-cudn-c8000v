@@ -1,0 +1,176 @@
+---
+# Lab 01: CUDN Supernets and BGP Advertising
+#
+# Prerequisites:
+#   ap common/setup.yaml
+#
+# Run it with:
+#   ap lab01-cudn-bgp/lab01.yaml
+#
+# Individual phases:
+#   ap lab01-cudn-bgp/lab01.yaml -t hub
+#   ap lab01-cudn-bgp/lab01.yaml -t spoke
+
+- name: 'Pre-check: Verify common setup is complete'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    - name: 'Check FRR-K8s pods on hub cluster'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_frr_pods
+
+    - name: 'Check FRR-K8s pods on spoke cluster'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_frr_pods
+
+    - name: 'Fail if common setup has not been run'
+      ansible.builtin.fail:
+        msg: >-
+          FRR-K8s pods are not running.
+          Run 'ap common/setup.yaml' first to enable FRR and RouteAdvertisements.
+      when: >
+        __hub_frr_pods.resources | length == 0 or
+        __spoke_frr_pods.resources | length == 0
+
+- name: 'Hub cluster - Create CUDN and BGP peering'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply hub CUDN manifests'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-cudn.yaml"
+      register: __hub_cudn
+      until: __hub_cudn is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for CUDN to be ready'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: ClusterUserDefinedNetwork
+        name: hub-network
+      register: __hub_cudn_status
+      until: >
+        __hub_cudn_status.resources | length > 0
+      retries: 30
+      delay: 10
+
+    - name: 'Apply hub BGP peering configuration'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-bgp.yaml"
+      register: __hub_bgp
+      until: __hub_bgp is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for BGP sessions to establish'
+      kubernetes.core.k8s_info:
+        api_version: frrk8s.metallb.io/v1beta1
+        kind: FRRNodeState
+        namespace: openshift-frr-k8s
+      register: __hub_bgp_state
+      until: __hub_bgp_state.resources | length > 0
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: 'Display hub BGP state'
+      ansible.builtin.debug:
+        var: __hub_bgp_state.resources
+      when: __hub_bgp_state is defined
+
+  tags: ['hub']
+
+- name: 'Spoke cluster - Create CUDN and BGP peering'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply spoke CUDN manifests'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-cudn.yaml"
+      register: __spoke_cudn
+      until: __spoke_cudn is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for spoke CUDN to be ready'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: ClusterUserDefinedNetwork
+        name: spoke-network
+      register: __spoke_cudn_status
+      until: >
+        __spoke_cudn_status.resources | length > 0
+      retries: 30
+      delay: 10
+
+    - name: 'Apply spoke BGP peering configuration'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-bgp.yaml"
+      register: __spoke_bgp
+      until: __spoke_bgp is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for spoke BGP sessions'
+      kubernetes.core.k8s_info:
+        api_version: frrk8s.metallb.io/v1beta1
+        kind: FRRNodeState
+        namespace: openshift-frr-k8s
+      register: __spoke_bgp_state
+      until: __spoke_bgp_state.resources | length > 0
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: 'Display spoke BGP state'
+      ansible.builtin.debug:
+        var: __spoke_bgp_state.resources
+      when: __spoke_bgp_state is defined
+
+  tags: ['spoke']

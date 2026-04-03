@@ -39,7 +39,7 @@ This guide sets up cross-cluster pod networking between a hub (management) and s
 
 ## Prerequisites
 
-- Hub and spoke clusters deployed via `ap labs/hcp/deploy.yaml` (OCP 4.20+)
+- Hub and spoke clusters deployed (OCP 4.20+)
 - c8000v router running on KVM with an interface on the 172.16.252.0/24 network
 - Both clusters share the same L2 network
 
@@ -131,7 +131,7 @@ oc get crd routeadvertisements.k8s.ovn.org
 #### 2b. Create CUDN namespace and network
 
 ```bash
-oc apply -f labs/hcp/manifest/hub-cudn.yaml
+oc apply -f lab01-cudn-bgp/manifest/hub-cudn.yaml
 ```
 
 This creates:
@@ -141,7 +141,7 @@ This creates:
 #### 2c. Create FRRConfiguration and RouteAdvertisements
 
 ```bash
-oc apply -f labs/hcp/manifest/hub-bgp.yaml
+oc apply -f lab01-cudn-bgp/manifest/hub-bgp.yaml
 ```
 
 This creates:
@@ -192,8 +192,8 @@ Wait for FRR-K8s pods and RouteAdvertisements CRD as above.
 #### 3b. Create CUDN namespace, network, and BGP peering
 
 ```bash
-oc apply -f labs/hcp/manifest/spoke-cudn.yaml
-oc apply -f labs/hcp/manifest/spoke-bgp.yaml
+oc apply -f lab01-cudn-bgp/manifest/spoke-cudn.yaml
+oc apply -f lab01-cudn-bgp/manifest/spoke-bgp.yaml
 ```
 
 Verify:
@@ -228,19 +228,22 @@ The /24 subnets are per-node allocations advertised by RouteAdvertisements. The 
 
 #### Deploy test pods
 
-On the hub:
+The `verify.yaml` playbook automatically deploys test pods on both clusters. To deploy them manually:
 
 ```bash
+# Hub
 export KUBECONFIG=/home/jkary/labs/hcp/deploy/auth/kubeconfig
-oc apply -f labs/hcp/manifest/test-pods.yaml   # only the hub-test pod
-```
+oc apply -f lab01-cudn-bgp/manifest/test-pods.yaml
 
-On the spoke:
-
-```bash
+# Spoke
 export KUBECONFIG=/home/jkary/labs/hcp/spoke/auth/kubeconfig
-oc apply -f labs/hcp/manifest/test-pods.yaml   # only the spoke-test pod
+oc apply -f lab01-cudn-bgp/manifest/test-pods.yaml
 ```
+
+> **Note:** The test-pods.yaml file contains pods for both clusters. Each pod
+> targets a different namespace (`cudn-hub-ns` / `cudn-spoke-ns`), so applying
+> the full file to each cluster is safe — only the matching namespace's pod will
+> be created.
 
 #### Get CUDN IPs
 
@@ -325,23 +328,33 @@ The pod's default route goes through the CUDN interface, so cross-cluster traffi
 
 | File | Description |
 |------|-------------|
-| `labs/hcp/bgp-cudn.yaml` | Ansible playbook automating all phases |
-| `labs/hcp/manifest/c8000v-bgp.cfg` | IOS config for c8000v BGP (AS 64514) |
-| `labs/hcp/manifest/hub-cudn.yaml` | Hub namespace + ClusterUserDefinedNetwork |
-| `labs/hcp/manifest/hub-bgp.yaml` | Hub FRRConfiguration + RouteAdvertisements |
-| `labs/hcp/manifest/spoke-cudn.yaml` | Spoke namespace + ClusterUserDefinedNetwork |
-| `labs/hcp/manifest/spoke-bgp.yaml` | Spoke FRRConfiguration + RouteAdvertisements |
-| `labs/hcp/manifest/test-pods.yaml` | Test pods for verification |
+| `common/setup.yaml` | Shared setup: c8000v base BGP + cluster FRR enablement |
+| `common/manifest/vars.yaml` | Site-specific variables (IPs, ASNs, CIDRs, kubeconfigs) |
+| `lab01-cudn-bgp/lab01.yaml` | Lab 01 playbook: create CUDNs and BGP peering |
+| `lab01-cudn-bgp/verify.yaml` | Verification: test pods + cross-cluster ping |
+| `lab01-cudn-bgp/manifest/c8000v-bgp.cfg` | IOS config for c8000v BGP (AS 64514) |
+| `lab01-cudn-bgp/manifest/hub-cudn.yaml` | Hub namespace + ClusterUserDefinedNetwork |
+| `lab01-cudn-bgp/manifest/hub-bgp.yaml` | Hub FRRConfiguration + RouteAdvertisements |
+| `lab01-cudn-bgp/manifest/spoke-cudn.yaml` | Spoke namespace + ClusterUserDefinedNetwork |
+| `lab01-cudn-bgp/manifest/spoke-bgp.yaml` | Spoke FRRConfiguration + RouteAdvertisements |
+| `lab01-cudn-bgp/manifest/test-pods.yaml` | Test pods for verification |
 
 ## Automated Deployment
 
 ```bash
-# Full deployment (all phases)
-ap labs/hcp/bgp-cudn.yaml
+# 1. Edit site-specific variables
+vi common/manifest/vars.yaml
+
+# 2. Run common setup (c8000v + cluster FRR enablement)
+ansible-playbook common/setup.yaml
+
+# 3. Deploy lab01 (CUDNs + BGP peering)
+ansible-playbook lab01-cudn-bgp/lab01.yaml
+
+# 4. Verify cross-cluster connectivity
+ansible-playbook lab01-cudn-bgp/verify.yaml
 
 # Individual phases
-ap labs/hcp/bgp-cudn.yaml -t c8000v    # Phase 1: configure router
-ap labs/hcp/bgp-cudn.yaml -t hub       # Phase 2: hub CUDN + BGP
-ap labs/hcp/bgp-cudn.yaml -t spoke     # Phases 3-4: spoke CUDN + BGP
-ap labs/hcp/bgp-cudn.yaml -t verify    # Phase 5: test pods + ping
+ansible-playbook lab01-cudn-bgp/lab01.yaml -t hub       # Hub CUDN + BGP only
+ansible-playbook lab01-cudn-bgp/lab01.yaml -t spoke     # Spoke CUDN + BGP only
 ```

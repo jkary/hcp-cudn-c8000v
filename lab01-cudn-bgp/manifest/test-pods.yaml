@@ -12,6 +12,13 @@ spec:
   - name: test
     image: quay.io/openshift/origin-network-tools:latest
     command: ["sleep", "infinity"]
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
 ---
 # Test pod on spoke CUDN
 apiVersion: v1
@@ -26,3 +33,10 @@ spec:
   - name: test
     image: quay.io/openshift/origin-network-tools:latest
     command: ["sleep", "infinity"]
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault

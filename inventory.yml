@@ -1,0 +1,9 @@
+---
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+    c8000v:
+      ansible_connection: ansible.netcommon.network_cli
+      ansible_network_os: cisco.ios.ios
+      ansible_network_cli_ssh_type: paramiko

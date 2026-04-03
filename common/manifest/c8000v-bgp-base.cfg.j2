@@ -1,0 +1,31 @@
+! c8000v base BGP configuration for CUDN routing between hub and spoke clusters
+! Generated from vars.yaml — do not edit directly
+
+router bgp {{ c8000v_asn }}
+ bgp router-id {{ c8000v_host }}
+ bgp log-neighbor-changes
+ !
+ ! Hub cluster nodes (AS {{ hub_asn }})
+{% for i in range(hub_node_ips | length) %}
+ neighbor {{ hub_node_ips[i] }} remote-as {{ hub_asn }}
+ neighbor {{ hub_node_ips[i] }} description {{ hub_node_descriptions[i] }}
+{% endfor %}
+{% if spoke_node_ips is defined %}
+ !
+ ! Spoke cluster nodes (AS {{ spoke_asn }})
+{% for i in range(spoke_node_ips | length) %}
+ neighbor {{ spoke_node_ips[i] }} remote-as {{ spoke_asn }}
+ neighbor {{ spoke_node_ips[i] }} description {{ spoke_node_descriptions[i] }}
+{% endfor %}
+{% endif %}
+ !
+ address-family ipv4 unicast
+{% for ip in hub_node_ips %}
+  neighbor {{ ip }} activate
+{% endfor %}
+{% for ip in spoke_node_ips | default([]) %}
+  neighbor {{ ip }} activate
+{% endfor %}
+ exit-address-family
+!
+end

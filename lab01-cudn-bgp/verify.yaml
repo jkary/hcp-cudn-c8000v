@@ -1,0 +1,258 @@
+---
+# Lab 01 Verification: Deploy test pods and check cross-cluster connectivity.
+#
+# Prerequisites:
+#   ap common/setup.yaml
+#   ap lab01-cudn-bgp/lab01.yaml
+#
+# Run it with:
+#   ap lab01-cudn-bgp/verify.yaml
+
+- name: 'Verify c8000v BGP state'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+
+  tasks:
+    - name: 'Check c8000v BGP summary'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp summary'
+      register: __verify_bgp_summary
+      ignore_errors: true
+
+    - name: 'Display c8000v BGP summary'
+      ansible.builtin.debug:
+        var: __verify_bgp_summary.stdout_lines
+      when: __verify_bgp_summary is succeeded
+
+    - name: 'Check c8000v BGP routes'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp'
+      register: __verify_bgp_routes
+      ignore_errors: true
+
+    - name: 'Display c8000v BGP routes'
+      ansible.builtin.debug:
+        var: __verify_bgp_routes.stdout_lines
+      when: __verify_bgp_routes is succeeded
+
+  tags: ['c8000v']
+
+- name: 'Verify clusters and test connectivity'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    # --- Hub verification ---
+    - name: 'Check hub BGP session states'
+      kubernetes.core.k8s_info:
+        api_version: frrk8s.metallb.io/v1beta1
+        kind: FRRNodeState
+        namespace: openshift-frr-k8s
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_sessions
+      tags: ['hub']
+
+    - name: 'Display hub BGP session states'
+      ansible.builtin.debug:
+        var: __hub_sessions.resources
+      tags: ['hub']
+
+    - name: 'Deploy test pod on hub CUDN'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: hub-test
+            namespace: cudn-hub-ns
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: quay.io/openshift/origin-network-tools:latest
+              command: ["sleep", "infinity"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      tags: ['hub']
+
+    - name: 'Wait for hub test pod to be running'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: hub-test
+        namespace: cudn-hub-ns
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_pod
+      until: >
+        __hub_pod.resources | length > 0 and
+        __hub_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+      tags: ['hub']
+
+    - name: 'Get hub test pod CUDN IP'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "ip -4 -o addr show ovn-udn1"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_cudn_ip_raw
+      tags: ['hub']
+
+    - name: 'Parse hub CUDN IP'
+      ansible.builtin.set_fact:
+        hub_pod_ip: "{{ __hub_cudn_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
+      tags: ['hub']
+
+    - name: 'Display hub test pod CUDN IP'
+      ansible.builtin.debug:
+        msg: "Hub test pod CUDN IP: {{ hub_pod_ip }}"
+      tags: ['hub']
+
+    # --- Spoke verification ---
+    - name: 'Check spoke BGP session states'
+      kubernetes.core.k8s_info:
+        api_version: frrk8s.metallb.io/v1beta1
+        kind: FRRNodeState
+        namespace: openshift-frr-k8s
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_sessions
+      tags: ['spoke']
+
+    - name: 'Display spoke BGP session states'
+      ansible.builtin.debug:
+        var: __spoke_sessions.resources
+      tags: ['spoke']
+
+    - name: 'Deploy test pod on spoke CUDN'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: spoke-test
+            namespace: cudn-spoke-ns
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: quay.io/openshift/origin-network-tools:latest
+              command: ["sleep", "infinity"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      tags: ['spoke']
+
+    - name: 'Wait for spoke test pod to be running'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: spoke-test
+        namespace: cudn-spoke-ns
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_pod
+      until: >
+        __spoke_pod.resources | length > 0 and
+        __spoke_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+      tags: ['spoke']
+
+    - name: 'Get spoke test pod CUDN IP'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: "ip -4 -o addr show ovn-udn1"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_cudn_ip_raw
+      tags: ['spoke']
+
+    - name: 'Parse spoke CUDN IP'
+      ansible.builtin.set_fact:
+        spoke_pod_ip: "{{ __spoke_cudn_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
+      tags: ['spoke']
+
+    - name: 'Display spoke test pod CUDN IP'
+      ansible.builtin.debug:
+        msg: "Spoke test pod CUDN IP: {{ spoke_pod_ip }}"
+      tags: ['spoke']
+
+    # --- Cross-cluster ping tests ---
+    - name: 'Ping spoke pod from hub pod'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "ping -c 3 -W 5 {{ spoke_pod_ip }}"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_to_spoke_ping
+      ignore_errors: true
+      tags: ['ping']
+
+    - name: 'Display hub-to-spoke ping result'
+      ansible.builtin.debug:
+        msg: "{{ __hub_to_spoke_ping.stdout_lines | default(__hub_to_spoke_ping.stderr_lines) }}"
+      tags: ['ping']
+
+    - name: 'Ping hub pod from spoke pod'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: "ping -c 3 -W 5 {{ hub_pod_ip }}"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_to_hub_ping
+      ignore_errors: true
+      tags: ['ping']
+
+    - name: 'Display spoke-to-hub ping result'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_to_hub_ping.stdout_lines | default(__spoke_to_hub_ping.stderr_lines) }}"
+      tags: ['ping']
+
+    - name: 'Summary'
+      ansible.builtin.debug:
+        msg:
+        - "Hub test pod CUDN IP: {{ hub_pod_ip }}"
+        - "Spoke test pod CUDN IP: {{ spoke_pod_ip }}"
+        - "Hub -> Spoke ping: {{ 'SUCCESS' if __hub_to_spoke_ping is succeeded else 'FAILED' }}"
+        - "Spoke -> Hub ping: {{ 'SUCCESS' if __spoke_to_hub_ping is succeeded else 'FAILED' }}"
+      tags: ['ping']
