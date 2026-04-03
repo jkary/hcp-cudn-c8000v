@@ -1,0 +1,13 @@
+---
+# EgressIP for hub CUDN namespace
+# Pins egress source IP to 172.16.252.70 for all pods in cudn-hub-ns
+apiVersion: k8s.ovn.org/v1
+kind: EgressIP
+metadata:
+  name: hub-egressip
+spec:
+  egressIPs:
+    - 172.16.252.70
+  namespaceSelector:
+    matchLabels:
+      cudn: hub

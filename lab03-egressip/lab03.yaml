@@ -1,0 +1,220 @@
+---
+# Lab 03: EgressIP and ECMP Load Balancing
+#
+# Prerequisites:
+#   ansible-playbook common/setup.yaml
+#
+# Run it with:
+#   ansible-playbook lab03-egressip/lab03.yaml
+#
+# Individual phases:
+#   ansible-playbook lab03-egressip/lab03.yaml -t hub
+#   ansible-playbook lab03-egressip/lab03.yaml -t spoke
+#   ansible-playbook lab03-egressip/lab03.yaml -t c8000v
+
+- name: 'Pre-check: Verify common setup is complete'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    - name: 'Check FRR-K8s pods on hub cluster'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_frr_pods
+
+    - name: 'Check FRR-K8s pods on spoke cluster'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_frr_pods
+
+    - name: 'Fail if common setup has not been run'
+      ansible.builtin.fail:
+        msg: >-
+          FRR-K8s pods are not running.
+          Run 'ansible-playbook common/setup.yaml' first.
+      when: >
+        __hub_frr_pods.resources | length == 0 or
+        __spoke_frr_pods.resources | length == 0
+
+- name: 'Hub cluster - Label nodes as egress-assignable'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Get hub cluster nodes'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: __hub_nodes
+
+    - name: 'Label nodes as egress-assignable'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Node
+        name: "{{ item.metadata.name }}"
+        definition:
+          metadata:
+            labels:
+              k8s.ovn.org/egress-assignable: ""
+      loop: "{{ __hub_nodes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+  tags: ['hub']
+
+- name: 'Hub cluster - Create CUDN and BGP peering'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply hub CUDN manifests'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-cudn.yaml"
+      register: __hub_cudn
+      until: __hub_cudn is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for CUDN to be ready'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: ClusterUserDefinedNetwork
+        name: hub-network
+      register: __hub_cudn_status
+      until: __hub_cudn_status.resources | length > 0
+      retries: 30
+      delay: 10
+
+    - name: 'Apply hub BGP peering configuration'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-bgp.yaml"
+      register: __hub_bgp
+      until: __hub_bgp is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for BGP sessions to establish'
+      kubernetes.core.k8s_info:
+        api_version: frrk8s.metallb.io/v1beta1
+        kind: FRRNodeState
+        namespace: openshift-frr-k8s
+      register: __hub_bgp_state
+      until: __hub_bgp_state.resources | length > 0
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+  tags: ['hub']
+
+- name: 'Spoke cluster - Create CUDN and BGP peering'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply spoke CUDN manifests'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-cudn.yaml"
+      register: __spoke_cudn
+      until: __spoke_cudn is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for spoke CUDN to be ready'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: ClusterUserDefinedNetwork
+        name: spoke-network
+      register: __spoke_cudn_status
+      until: __spoke_cudn_status.resources | length > 0
+      retries: 30
+      delay: 10
+
+    - name: 'Apply spoke BGP peering configuration'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-bgp.yaml"
+      register: __spoke_bgp
+      until: __spoke_bgp is not failed
+      retries: 5
+      delay: 10
+
+  tags: ['spoke']
+
+- name: 'Configure c8000v ECMP'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Push ECMP configuration to c8000v'
+      ansible.netcommon.cli_config:
+        config: "{{ lookup('file', playbook_dir + '/manifest/c8000v-ecmp.cfg') }}"
+
+    - name: 'Verify ECMP routing table'
+      ansible.netcommon.cli_command:
+        command: 'show ip route bgp'
+      register: __ecmp_routes
+
+    - name: 'Display ECMP routes'
+      ansible.builtin.debug:
+        var: __ecmp_routes.stdout_lines
+
+  tags: ['c8000v']

@@ -1,8 +1,12 @@
 ---
-# Kustomize overlay for Lab 03: EgressIP and load balancing.
-# Placeholder — resources will be added when this lab is built.
+# Kustomize overlay for Lab 03: EgressIP and ECMP load balancing.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - ../../common/manifest
+  - hub-cudn.yaml
+  - hub-bgp.yaml
+  - spoke-cudn.yaml
+  - spoke-bgp.yaml
+  - hub-egressip.yaml

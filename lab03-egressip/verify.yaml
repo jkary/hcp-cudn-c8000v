@@ -1,0 +1,374 @@
+---
+# Lab 03 Verification: EgressIP and ECMP demonstration.
+#
+# Three phases:
+#   Phase 1 - Default egress (node IP as source)
+#   Phase 2 - EgressIP applied (172.16.252.70 as source)
+#   Phase 3 - ECMP verification on c8000v
+#
+# Prerequisites:
+#   ansible-playbook common/setup.yaml
+#   ansible-playbook lab03-egressip/lab03.yaml
+#
+# Run it with:
+#   ansible-playbook lab03-egressip/verify.yaml
+
+# === Setup: configure ICMP logging ACL on c8000v ===
+- name: 'Setup: Configure ICMP logging on c8000v'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Configure ACL to log incoming ICMP packets'
+      ansible.netcommon.cli_config:
+        config: |
+          ip access-list extended ICMP-LOG
+           permit icmp any host {{ c8000v_host }} log
+           permit ip any any
+          !
+          interface GigabitEthernet1
+           ip access-group ICMP-LOG in
+          !
+          end
+
+    - name: 'Clear the log buffer'
+      ansible.netcommon.cli_command:
+        command: 'clear logging'
+        prompt: 'Clear logging buffer'
+        answer: "\r"
+
+# === Phase 1: Default egress behavior ===
+- name: 'Phase 1: Default egress behavior (before EgressIP)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Remove EgressIP if present from previous run'
+      kubernetes.core.k8s:
+        state: absent
+        api_version: k8s.ovn.org/v1
+        kind: EgressIP
+        name: hub-egressip
+      ignore_errors: true
+
+    - name: 'Wait for EgressIP removal to take effect'
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: 'Label hub namespace for privileged pod security'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-hub-ns
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+
+    - name: 'Deploy test pod on hub CUDN'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: egress-test
+            namespace: cudn-hub-ns
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
+              securityContext:
+                capabilities:
+                  add: ["NET_RAW"]
+
+    - name: 'Wait for test pod to be running'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: egress-test
+        namespace: cudn-hub-ns
+      register: __test_pod
+      until: >
+        __test_pod.resources | length > 0 and
+        __test_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+
+    - name: 'Get test pod placement'
+      ansible.builtin.set_fact:
+        test_pod_node: "{{ __test_pod.resources[0].spec.nodeName }}"
+        test_pod_host_ip: "{{ __test_pod.resources[0].status.hostIP }}"
+
+    - name: 'Display pod placement'
+      ansible.builtin.debug:
+        msg:
+          - "Test pod scheduled on: {{ test_pod_node }}"
+          - "Node IP (expected default egress source): {{ test_pod_host_ip }}"
+
+    - name: 'Default egress: ping c8000v from test pod'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: egress-test
+        command: "ping -c 3 -W 5 {{ c8000v_host }}"
+      register: __default_ping
+      ignore_errors: true
+
+    - name: 'Display default egress ping'
+      ansible.builtin.debug:
+        msg: "{{ __default_ping.stdout_lines | default(__default_ping.stderr_lines) }}"
+
+  tags: ['phase1']
+
+- name: 'Phase 1b: Check source IP on c8000v (before EgressIP)'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Check log for ICMP source IPs (before EgressIP)'
+      ansible.netcommon.cli_command:
+        command: 'show logging | include ICMP'
+      register: __log_before
+
+    - name: 'ICMP source IPs seen by c8000v (before EgressIP)'
+      ansible.builtin.debug:
+        msg:
+          - "Without EgressIP, source should be the node IP (172.16.252.6x):"
+          - "{{ __log_before.stdout_lines | default(['No ICMP log entries']) }}"
+
+    - name: 'Clear log for Phase 2'
+      ansible.netcommon.cli_command:
+        command: 'clear logging'
+        prompt: 'Clear logging buffer'
+        answer: "\r"
+
+  tags: ['phase1']
+
+# === Phase 2: Apply EgressIP ===
+- name: 'Phase 2: Apply EgressIP and verify'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply EgressIP CR'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-egressip.yaml"
+      register: __egressip
+      until: __egressip is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for EgressIP to be assigned'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: EgressIP
+        name: hub-egressip
+      register: __egressip_status
+      until: >
+        __egressip_status.resources | length > 0 and
+        __egressip_status.resources[0].get('status', {}).get('items', []) | length > 0
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: 'Display EgressIP assignment'
+      ansible.builtin.debug:
+        msg: "EgressIP assigned: {{ __egressip_status.resources[0].status }}"
+      when: >
+        __egressip_status is not failed and
+        __egressip_status.resources | default([]) | length > 0 and
+        __egressip_status.resources[0].status is defined
+
+    - name: 'EgressIP egress: ping c8000v from test pod'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: egress-test
+        command: "ping -c 3 -W 5 {{ c8000v_host }}"
+      register: __egressip_ping
+      ignore_errors: true
+
+    - name: 'Display EgressIP ping'
+      ansible.builtin.debug:
+        msg: "{{ __egressip_ping.stdout_lines | default(__egressip_ping.stderr_lines) }}"
+
+  tags: ['phase2']
+
+- name: 'Phase 2b: Check source IP on c8000v (after EgressIP)'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Check log for ICMP source IPs (after EgressIP)'
+      ansible.netcommon.cli_command:
+        command: 'show logging | include ICMP'
+      register: __log_after
+
+    - name: 'ICMP source IPs seen by c8000v (after EgressIP)'
+      ansible.builtin.debug:
+        msg:
+          - "With EgressIP, source should be 172.16.252.70 (not a node IP):"
+          - "{{ __log_after.stdout_lines | default(['No ICMP log entries']) }}"
+
+  tags: ['phase2']
+
+# === Phase 3: ECMP verification ===
+- name: 'Phase 3: Verify ECMP on c8000v'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Show ECMP routing for hub CUDN prefix'
+      ansible.netcommon.cli_command:
+        command: 'show ip route 10.100.0.0 255.255.0.0'
+      register: __ecmp_detail
+
+    - name: 'Display ECMP paths for 10.100.0.0/16'
+      ansible.builtin.debug:
+        msg:
+          - "With maximum-paths 3, the c8000v should show 3 equal-cost next-hops:"
+          - "  172.16.252.61 (hub-master-0)"
+          - "  172.16.252.62 (hub-master-1)"
+          - "  172.16.252.63 (hub-master-2)"
+          - "{{ __ecmp_detail.stdout_lines }}"
+
+    - name: 'Show BGP multipath status'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp 10.100.0.0/16'
+      register: __bgp_multipath
+
+    - name: 'Display BGP multipath'
+      ansible.builtin.debug:
+        var: __bgp_multipath.stdout_lines
+
+    - name: 'Show CEF load-sharing entries'
+      ansible.netcommon.cli_command:
+        command: 'show ip cef 10.100.0.0/16'
+      register: __cef_ecmp
+
+    - name: 'Display CEF ECMP'
+      ansible.builtin.debug:
+        var: __cef_ecmp.stdout_lines
+
+  tags: ['phase3']
+
+# === Cleanup: remove ICMP logging ACL ===
+- name: 'Cleanup: Remove ICMP logging ACL from c8000v'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Remove ACL from interface'
+      ansible.netcommon.cli_config:
+        config: |
+          interface GigabitEthernet1
+           no ip access-group ICMP-LOG in
+          !
+          no ip access-list extended ICMP-LOG
+          !
+          end
+
+# === Summary ===
+- name: 'Lab 03 Summary'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: 'Summary'
+      ansible.builtin.debug:
+        msg:
+          - "=== Lab 03: EgressIP and ECMP ==="
+          - ""
+          - "1. DEFAULT EGRESS: Without EgressIP, pod egress traffic uses the"
+          - "   node IP as source (SNAT). Which node depends on pod scheduling."
+          - ""
+          - "2. EGRESSIP: With EgressIP CR applied, all egress from cudn-hub-ns"
+          - "   uses 172.16.252.70 as source IP, regardless of pod placement."
+          - ""
+          - "3. ECMP: With maximum-paths 3 on c8000v, return traffic to"
+          - "   10.100.0.0/16 is load-balanced across all 3 hub nodes."
+          - ""
+          - "4. KEY INSIGHT: EgressIP affects external egress only."
+          - "   Cross-cluster CUDN traffic still uses the pod's CUDN IP."
