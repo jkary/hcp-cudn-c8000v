@@ -1,13 +1,14 @@
 ---
-# Lab 02 Verification: Trace cross-cluster ICMP flows at each hop.
+# Lab 02 Verification: Capture iperf3 traffic flows across clusters.
 #
 # Prerequisites:
-#   ansible-playbook lab02-flow-tracing/lab02.yaml
+#   ansible-playbook lab01-cudn-bgp/verify.yaml  (deploys iperf3 test pods)
+#   ansible-playbook lab02-flow-tracing/lab02.yaml (deploys capture pods)
 #
 # Run it with:
 #   ansible-playbook lab02-flow-tracing/verify.yaml
 
-- name: 'Trace cross-cluster packet flows'
+- name: 'Capture iperf3 traffic flows'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -16,77 +17,120 @@
     - ../common/manifest/vars.yaml
 
   tasks:
-    # --- Get CUDN IPs ---
-    - name: 'Get hub capture pod CUDN IP'
-      kubernetes.core.k8s_exec:
+    # --- Get CUDN IPs from test pod annotations ---
+    - name: 'Get hub test pod info'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: hub-test
         namespace: cudn-hub-ns
-        pod: hub-capture
-        command: "ip -4 -o addr show ovn-udn1"
       environment:
         KUBECONFIG: "{{ hub_kubeconfig }}"
-      register: __hub_ip_raw
+      register: __hub_test_pod
 
-    - name: 'Get spoke capture pod CUDN IP'
-      kubernetes.core.k8s_exec:
+    - name: 'Get spoke test pod info'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: spoke-test
         namespace: cudn-spoke-ns
-        pod: spoke-capture
-        command: "ip -4 -o addr show ovn-udn1"
       environment:
         KUBECONFIG: "{{ spoke_kubeconfig }}"
-      register: __spoke_ip_raw
+      register: __spoke_test_pod
 
-    - name: 'Parse CUDN IPs'
+    - name: 'Parse test pod CUDN IPs from annotations'
       ansible.builtin.set_fact:
-        hub_cudn_ip: "{{ __hub_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
-        spoke_cudn_ip: "{{ __spoke_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
+        hub_test_ip: "{{ (__hub_test_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-hub-ns/hub-network']['ip_address'] | regex_replace('/.*', '') }}"
+        spoke_test_ip: "{{ (__spoke_test_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-spoke-ns/spoke-network']['ip_address'] | regex_replace('/.*', '') }}"
 
     - name: 'Display CUDN IPs'
       ansible.builtin.debug:
         msg:
-        - "Hub capture pod:  {{ hub_cudn_ip }}"
-        - "Spoke capture pod: {{ spoke_cudn_ip }}"
+        - "Hub test pod:  {{ hub_test_ip }}"
+        - "Spoke test pod: {{ spoke_test_ip }}"
 
-    # --- Capture and ping ---
-    # Ping runs in the background; tcpdump runs in the foreground so it
-    # stays alive for the duration of the k8s_exec session.
-    - name: 'Capture and ping hub -> spoke'
-      kubernetes.core.k8s_exec:
-        namespace: cudn-hub-ns
-        pod: hub-capture
-        command: >-
-          sh -c 'timeout 20 tcpdump -i ovn-udn1 -nn -c 10 icmp &
-          TCPDUMP_PID=$!; sleep 1;
-          ping -c 5 -W 3 {{ spoke_cudn_ip }};
-          echo "---WAITING FOR CAPTURE---";
-          wait $TCPDUMP_PID 2>/dev/null; true'
-      environment:
-        KUBECONFIG: "{{ hub_kubeconfig }}"
-      register: __hub_result
-      ignore_errors: true
-
-    - name: 'Capture and ping spoke -> hub'
+    # --- Hub -> Spoke: iperf3 + tcpdump ---
+    - name: 'Start iperf3 server on spoke'
       kubernetes.core.k8s_exec:
         namespace: cudn-spoke-ns
-        pod: spoke-capture
-        command: >-
-          sh -c 'timeout 20 tcpdump -i ovn-udn1 -nn -c 10 icmp &
-          TCPDUMP_PID=$!; sleep 1;
-          ping -c 5 -W 3 {{ hub_cudn_ip }};
-          echo "---WAITING FOR CAPTURE---";
-          wait $TCPDUMP_PID 2>/dev/null; true'
+        pod: spoke-test
+        command: "sh -c 'iperf3 -s -1 -D && echo iperf3 server started'"
       environment:
         KUBECONFIG: "{{ spoke_kubeconfig }}"
-      register: __spoke_result
+
+    - name: 'Hub -> Spoke: iperf3 + tcpdump capture'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: >-
+          sh -c 'iperf3 -c {{ spoke_test_ip }} -t 10 > /tmp/iperf3.log 2>&1 &
+          IPERF_PID=$!;
+          timeout 20 tcpdump -i ovn-udn1 -nn -c 50 tcp port 5201;
+          wait $IPERF_PID 2>/dev/null; true'
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_capture
+      ignore_errors: true
+
+    - name: 'Collect hub -> spoke iperf3 results'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "cat /tmp/iperf3.log"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_iperf3
+      ignore_errors: true
+
+    # --- Spoke -> Hub: iperf3 + tcpdump ---
+    - name: 'Start iperf3 server on hub'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "sh -c 'iperf3 -s -1 -D && echo iperf3 server started'"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+
+    - name: 'Spoke -> Hub: iperf3 + tcpdump capture'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: >-
+          sh -c 'iperf3 -c {{ hub_test_ip }} -t 10 > /tmp/iperf3.log 2>&1 &
+          IPERF_PID=$!;
+          timeout 20 tcpdump -i ovn-udn1 -nn -c 50 tcp port 5201;
+          wait $IPERF_PID 2>/dev/null; true'
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_capture
+      ignore_errors: true
+
+    - name: 'Collect spoke -> hub iperf3 results'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: "cat /tmp/iperf3.log"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_iperf3
       ignore_errors: true
 
     # --- Display results ---
-    - name: 'Hub flow trace'
+    - name: 'Hub -> Spoke iperf3 throughput'
       ansible.builtin.debug:
-        msg: "{{ __hub_result.stdout_lines }}"
+        msg: "{{ __hub_iperf3.stdout_lines | default(['No iperf3 data']) }}"
 
-    - name: 'Spoke flow trace'
+    - name: 'Hub tcpdump - outbound iperf3 traffic (tcp/5201)'
       ansible.builtin.debug:
-        msg: "{{ __spoke_result.stdout_lines }}"
+        msg: "{{ __hub_capture.stdout_lines | default(['No capture data']) }}"
+
+    - name: 'Spoke -> Hub iperf3 throughput'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_iperf3.stdout_lines | default(['No iperf3 data']) }}"
+
+    - name: 'Spoke tcpdump - outbound iperf3 traffic (tcp/5201)'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_capture.stdout_lines | default(['No capture data']) }}"
 
   tags: ['trace']
 

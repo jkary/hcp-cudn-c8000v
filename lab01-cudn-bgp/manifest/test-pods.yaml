@@ -1,5 +1,5 @@
 ---
-# Test pod on hub CUDN
+# Test pod on hub CUDN (iperf3 for throughput testing)
 apiVersion: v1
 kind: Pod
 metadata:
@@ -10,17 +10,13 @@ metadata:
 spec:
   containers:
   - name: test
-    image: quay.io/openshift/origin-network-tools:latest
-    command: ["sleep", "infinity"]
+    image: docker.io/nicolaka/netshoot:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
     securityContext:
-      allowPrivilegeEscalation: false
-      runAsNonRoot: true
       capabilities:
-        drop: ["ALL"]
-      seccompProfile:
-        type: RuntimeDefault
+        add: ["NET_RAW"]
 ---
-# Test pod on spoke CUDN
+# Test pod on spoke CUDN (iperf3 for throughput testing)
 apiVersion: v1
 kind: Pod
 metadata:
@@ -31,12 +27,8 @@ metadata:
 spec:
   containers:
   - name: test
-    image: quay.io/openshift/origin-network-tools:latest
-    command: ["sleep", "infinity"]
+    image: docker.io/nicolaka/netshoot:latest
+    command: ["/bin/sh", "-c", "sleep infinity"]
     securityContext:
-      allowPrivilegeEscalation: false
-      runAsNonRoot: true
       capabilities:
-        drop: ["ALL"]
-      seccompProfile:
-        type: RuntimeDefault
+        add: ["NET_RAW"]

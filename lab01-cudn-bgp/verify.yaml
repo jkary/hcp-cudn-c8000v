@@ -73,6 +73,20 @@
         var: __hub_sessions.resources
       tags: ['hub']
 
+    - name: 'Label hub namespace for privileged pod security'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-hub-ns
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      tags: ['hub']
+
     - name: 'Deploy test pod on hub CUDN'
       kubernetes.core.k8s:
         state: present
@@ -87,15 +101,11 @@
           spec:
             containers:
             - name: test
-              image: quay.io/openshift/origin-network-tools:latest
-              command: ["sleep", "infinity"]
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
               securityContext:
-                allowPrivilegeEscalation: false
-                runAsNonRoot: true
                 capabilities:
-                  drop: ["ALL"]
-                seccompProfile:
-                  type: RuntimeDefault
+                  add: ["NET_RAW"]
       environment:
         KUBECONFIG: "{{ hub_kubeconfig }}"
       tags: ['hub']
@@ -116,19 +126,9 @@
       delay: 10
       tags: ['hub']
 
-    - name: 'Get hub test pod CUDN IP'
-      kubernetes.core.k8s_exec:
-        namespace: cudn-hub-ns
-        pod: hub-test
-        command: "ip -4 -o addr show ovn-udn1"
-      environment:
-        KUBECONFIG: "{{ hub_kubeconfig }}"
-      register: __hub_cudn_ip_raw
-      tags: ['hub']
-
-    - name: 'Parse hub CUDN IP'
+    - name: 'Get hub test pod CUDN IP from annotation'
       ansible.builtin.set_fact:
-        hub_pod_ip: "{{ __hub_cudn_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
+        hub_pod_ip: "{{ (__hub_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-hub-ns/hub-network']['ip_address'] | regex_replace('/.*', '') }}"
       tags: ['hub']
 
     - name: 'Display hub test pod CUDN IP'
@@ -152,6 +152,20 @@
         var: __spoke_sessions.resources
       tags: ['spoke']
 
+    - name: 'Label spoke namespace for privileged pod security'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-spoke-ns
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      tags: ['spoke']
+
     - name: 'Deploy test pod on spoke CUDN'
       kubernetes.core.k8s:
         state: present
@@ -166,15 +180,11 @@
           spec:
             containers:
             - name: test
-              image: quay.io/openshift/origin-network-tools:latest
-              command: ["sleep", "infinity"]
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
               securityContext:
-                allowPrivilegeEscalation: false
-                runAsNonRoot: true
                 capabilities:
-                  drop: ["ALL"]
-                seccompProfile:
-                  type: RuntimeDefault
+                  add: ["NET_RAW"]
       environment:
         KUBECONFIG: "{{ spoke_kubeconfig }}"
       tags: ['spoke']
@@ -195,19 +205,9 @@
       delay: 10
       tags: ['spoke']
 
-    - name: 'Get spoke test pod CUDN IP'
-      kubernetes.core.k8s_exec:
-        namespace: cudn-spoke-ns
-        pod: spoke-test
-        command: "ip -4 -o addr show ovn-udn1"
-      environment:
-        KUBECONFIG: "{{ spoke_kubeconfig }}"
-      register: __spoke_cudn_ip_raw
-      tags: ['spoke']
-
-    - name: 'Parse spoke CUDN IP'
+    - name: 'Get spoke test pod CUDN IP from annotation'
       ansible.builtin.set_fact:
-        spoke_pod_ip: "{{ __spoke_cudn_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
+        spoke_pod_ip: "{{ (__spoke_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-spoke-ns/spoke-network']['ip_address'] | regex_replace('/.*', '') }}"
       tags: ['spoke']
 
     - name: 'Display spoke test pod CUDN IP'
@@ -215,44 +215,62 @@
         msg: "Spoke test pod CUDN IP: {{ spoke_pod_ip }}"
       tags: ['spoke']
 
-    # --- Cross-cluster ping tests ---
-    - name: 'Ping spoke pod from hub pod'
-      kubernetes.core.k8s_exec:
-        namespace: cudn-hub-ns
-        pod: hub-test
-        command: "ping -c 3 -W 5 {{ spoke_pod_ip }}"
-      environment:
-        KUBECONFIG: "{{ hub_kubeconfig }}"
-      register: __hub_to_spoke_ping
-      ignore_errors: true
-      tags: ['ping']
-
-    - name: 'Display hub-to-spoke ping result'
-      ansible.builtin.debug:
-        msg: "{{ __hub_to_spoke_ping.stdout_lines | default(__hub_to_spoke_ping.stderr_lines) }}"
-      tags: ['ping']
-
-    - name: 'Ping hub pod from spoke pod'
+    # --- Cross-cluster iperf3 tests ---
+    - name: 'Start iperf3 server on spoke pod'
       kubernetes.core.k8s_exec:
         namespace: cudn-spoke-ns
         pod: spoke-test
-        command: "ping -c 3 -W 5 {{ hub_pod_ip }}"
+        command: "sh -c 'iperf3 -s -1 -D && echo iperf3 server started on port 5201'"
       environment:
         KUBECONFIG: "{{ spoke_kubeconfig }}"
-      register: __spoke_to_hub_ping
-      ignore_errors: true
-      tags: ['ping']
+      tags: ['iperf3']
 
-    - name: 'Display spoke-to-hub ping result'
+    - name: 'iperf3 hub -> spoke (10s throughput test)'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "iperf3 -c {{ spoke_pod_ip }} -t 10"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_to_spoke_iperf3
+      ignore_errors: true
+      tags: ['iperf3']
+
+    - name: 'Display hub -> spoke iperf3 result'
       ansible.builtin.debug:
-        msg: "{{ __spoke_to_hub_ping.stdout_lines | default(__spoke_to_hub_ping.stderr_lines) }}"
-      tags: ['ping']
+        msg: "{{ __hub_to_spoke_iperf3.stdout_lines | default(__hub_to_spoke_iperf3.stderr_lines) }}"
+      tags: ['iperf3']
+
+    - name: 'Start iperf3 server on hub pod'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "sh -c 'iperf3 -s -1 -D && echo iperf3 server started on port 5201'"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      tags: ['iperf3']
+
+    - name: 'iperf3 spoke -> hub (10s throughput test)'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: "iperf3 -c {{ hub_pod_ip }} -t 10"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_to_hub_iperf3
+      ignore_errors: true
+      tags: ['iperf3']
+
+    - name: 'Display spoke -> hub iperf3 result'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_to_hub_iperf3.stdout_lines | default(__spoke_to_hub_iperf3.stderr_lines) }}"
+      tags: ['iperf3']
 
     - name: 'Summary'
       ansible.builtin.debug:
         msg:
         - "Hub test pod CUDN IP: {{ hub_pod_ip }}"
         - "Spoke test pod CUDN IP: {{ spoke_pod_ip }}"
-        - "Hub -> Spoke ping: {{ 'SUCCESS' if __hub_to_spoke_ping is succeeded else 'FAILED' }}"
-        - "Spoke -> Hub ping: {{ 'SUCCESS' if __spoke_to_hub_ping is succeeded else 'FAILED' }}"
-      tags: ['ping']
+        - "Hub -> Spoke iperf3: {{ 'SUCCESS' if __hub_to_spoke_iperf3 is succeeded else 'FAILED' }}"
+        - "Spoke -> Hub iperf3: {{ 'SUCCESS' if __spoke_to_hub_iperf3 is succeeded else 'FAILED' }}"
+      tags: ['iperf3']
