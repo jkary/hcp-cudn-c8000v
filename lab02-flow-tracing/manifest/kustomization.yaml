@@ -1,8 +1,9 @@
 ---
 # Kustomize overlay for Lab 02: Flow tracing with tshark.
-# Placeholder — resources will be added when this lab is built.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - ../../common/manifest
+  - hub-capture.yaml
+  - spoke-capture.yaml

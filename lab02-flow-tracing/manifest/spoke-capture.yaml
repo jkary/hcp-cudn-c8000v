@@ -1,0 +1,17 @@
+---
+# Capture pod on spoke CUDN with NET_RAW for tshark/tcpdump
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spoke-capture
+  namespace: cudn-spoke-ns
+  labels:
+    app: cudn-capture
+spec:
+  containers:
+  - name: capture
+    image: quay.io/openshift/origin-network-tools:latest
+    command: ["sleep", "infinity"]
+    securityContext:
+      capabilities:
+        add: ["NET_RAW"]

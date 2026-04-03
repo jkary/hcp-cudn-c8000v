@@ -1,0 +1,136 @@
+---
+# Lab 02 Verification: Trace cross-cluster ICMP flows at each hop.
+#
+# Prerequisites:
+#   ansible-playbook lab02-flow-tracing/lab02.yaml
+#
+# Run it with:
+#   ansible-playbook lab02-flow-tracing/verify.yaml
+
+- name: 'Trace cross-cluster packet flows'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    # --- Get CUDN IPs ---
+    - name: 'Get hub capture pod CUDN IP'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-capture
+        command: "ip -4 -o addr show ovn-udn1"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_ip_raw
+
+    - name: 'Get spoke capture pod CUDN IP'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-capture
+        command: "ip -4 -o addr show ovn-udn1"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_ip_raw
+
+    - name: 'Parse CUDN IPs'
+      ansible.builtin.set_fact:
+        hub_cudn_ip: "{{ __hub_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
+        spoke_cudn_ip: "{{ __spoke_ip_raw.stdout | regex_search('inet ([0-9.]+)/', '\\1') | first }}"
+
+    - name: 'Display CUDN IPs'
+      ansible.builtin.debug:
+        msg:
+        - "Hub capture pod:  {{ hub_cudn_ip }}"
+        - "Spoke capture pod: {{ spoke_cudn_ip }}"
+
+    # --- Capture and ping ---
+    # Ping runs in the background; tcpdump runs in the foreground so it
+    # stays alive for the duration of the k8s_exec session.
+    - name: 'Capture and ping hub -> spoke'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-capture
+        command: >-
+          sh -c 'timeout 20 tcpdump -i ovn-udn1 -nn -c 10 icmp &
+          TCPDUMP_PID=$!; sleep 1;
+          ping -c 5 -W 3 {{ spoke_cudn_ip }};
+          echo "---WAITING FOR CAPTURE---";
+          wait $TCPDUMP_PID 2>/dev/null; true'
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_result
+      ignore_errors: true
+
+    - name: 'Capture and ping spoke -> hub'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-capture
+        command: >-
+          sh -c 'timeout 20 tcpdump -i ovn-udn1 -nn -c 10 icmp &
+          TCPDUMP_PID=$!; sleep 1;
+          ping -c 5 -W 3 {{ hub_cudn_ip }};
+          echo "---WAITING FOR CAPTURE---";
+          wait $TCPDUMP_PID 2>/dev/null; true'
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_result
+      ignore_errors: true
+
+    # --- Display results ---
+    - name: 'Hub flow trace'
+      ansible.builtin.debug:
+        msg: "{{ __hub_result.stdout_lines }}"
+
+    - name: 'Spoke flow trace'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_result.stdout_lines }}"
+
+  tags: ['trace']
+
+- name: 'c8000v routing perspective'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+
+  tasks:
+    - name: 'Show c8000v BGP routes'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp'
+      register: __bgp_routes
+
+    - name: 'Show c8000v routing table for CUDN prefixes'
+      ansible.netcommon.cli_command:
+        command: 'show ip route bgp'
+      register: __ip_routes
+
+    - name: 'Show c8000v interface counters'
+      ansible.netcommon.cli_command:
+        command: 'show interfaces GigabitEthernet1 | include packets'
+      register: __iface_counters
+
+    - name: 'c8000v BGP routes'
+      ansible.builtin.debug:
+        var: __bgp_routes.stdout_lines
+
+    - name: 'c8000v BGP routing table'
+      ansible.builtin.debug:
+        var: __ip_routes.stdout_lines
+
+    - name: 'c8000v interface packet counters'
+      ansible.builtin.debug:
+        var: __iface_counters.stdout_lines
+
+  tags: ['c8000v']

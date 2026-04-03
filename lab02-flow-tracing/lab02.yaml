@@ -1,0 +1,155 @@
+---
+# Lab 02: Flow Tracing with tshark
+#
+# Prerequisites:
+#   ansible-playbook common/setup.yaml
+#   ansible-playbook lab01-cudn-bgp/lab01.yaml
+#
+# Run it with:
+#   ansible-playbook lab02-flow-tracing/lab02.yaml
+
+- name: 'Pre-check: Verify lab01 is deployed'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    - name: 'Check hub test pod exists'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: hub-test
+        namespace: cudn-hub-ns
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_test_pod
+
+    - name: 'Check spoke test pod exists'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: spoke-test
+        namespace: cudn-spoke-ns
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_test_pod
+
+    - name: 'Fail if lab01 test pods are not running'
+      ansible.builtin.fail:
+        msg: >-
+          Lab01 test pods are not running.
+          Run 'ansible-playbook lab01-cudn-bgp/lab01.yaml' and
+          'ansible-playbook lab01-cudn-bgp/verify.yaml' first.
+      when: >
+        __hub_test_pod.resources | length == 0 or
+        __hub_test_pod.resources[0].status.phase != 'Running' or
+        __spoke_test_pod.resources | length == 0 or
+        __spoke_test_pod.resources[0].status.phase != 'Running'
+
+- name: 'Deploy capture pods'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  tasks:
+    - name: 'Label hub namespace for baseline pod security (allows NET_RAW)'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-hub-ns
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      tags: ['hub']
+
+    - name: 'Label spoke namespace for baseline pod security (allows NET_RAW)'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-spoke-ns
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      tags: ['spoke']
+
+    - name: 'Deploy hub capture pod'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-capture.yaml"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      tags: ['hub']
+
+    - name: 'Wait for hub capture pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: hub-capture
+        namespace: cudn-hub-ns
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_capture
+      until: >
+        __hub_capture.resources | length > 0 and
+        __hub_capture.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+      tags: ['hub']
+
+    - name: 'Deploy spoke capture pod'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-capture.yaml"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      tags: ['spoke']
+
+    - name: 'Wait for spoke capture pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: spoke-capture
+        namespace: cudn-spoke-ns
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_capture
+      until: >
+        __spoke_capture.resources | length > 0 and
+        __spoke_capture.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+      tags: ['spoke']
+
+    - name: 'Verify capture capability on hub'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-capture
+        command: "tcpdump -c 1 -i ovn-udn1 -w /dev/null"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_cap_test
+      ignore_errors: true
+      timeout: 10
+      tags: ['hub']
+
+    - name: 'Display capture capability result'
+      ansible.builtin.debug:
+        msg: "Hub capture: {{ 'OK' if __hub_cap_test is succeeded else 'FAILED - check NET_RAW capability' }}"
+      tags: ['hub']
