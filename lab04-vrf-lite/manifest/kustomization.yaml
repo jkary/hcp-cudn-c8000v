@@ -1,8 +1,17 @@
 ---
 # Kustomize overlay for Lab 04: VRF lite and multi-tenant isolation.
-# Placeholder — resources will be added when this lab is built.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - ../../common/manifest
+  - nmstate-operator.yaml
+  - nmstate-instance.yaml
+  - nncp-vlans.yaml
+  - spoke-nncp-vlans.yaml
+  - hub-tenant-a-cudn.yaml
+  - hub-tenant-a-bgp.yaml
+  - hub-tenant-c-cudn.yaml
+  - hub-tenant-c-bgp.yaml
+  - spoke-tenant-b-cudn.yaml
+  - spoke-tenant-b-bgp.yaml

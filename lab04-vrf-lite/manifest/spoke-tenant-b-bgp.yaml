@@ -1,0 +1,46 @@
+---
+# FRRConfiguration for Tenant B on spoke — peers over VLAN 200
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: tenant-b-bgp
+  namespace: openshift-frr-k8s
+  labels:
+    network: tenant-b-net
+spec:
+  bgp:
+    routers:
+    - asn: 64513
+      vrf: tenant-b-net
+      prefixes:
+      - 10.200.0.0/16
+      neighbors:
+      - address: 172.16.200.50
+        asn: 64514
+        disableMP: true
+        toReceive:
+          allowed:
+            mode: all
+        toAdvertise:
+          allowed:
+            mode: all
+---
+# RouteAdvertisements for Tenant B — targetVRF routes to tenant-b-net VRF
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: tenant-b-routes
+spec:
+  targetVRF: tenant-b-net
+  advertisements:
+  - PodNetwork
+  networkSelectors:
+  - networkSelectionType: ClusterUserDefinedNetworks
+    clusterUserDefinedNetworkSelector:
+      networkSelector:
+        matchLabels:
+          advertise: "true"
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      network: tenant-b-net

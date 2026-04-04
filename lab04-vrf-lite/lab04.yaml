@@ -1,0 +1,458 @@
+---
+# Lab 04: VRF Lite with VLAN Trunking — Multi-Tenant Isolation
+#
+# Tenant A: hub cluster (VLAN 100, CUDN 10.100.0.0/16)
+# Tenant B: spoke cluster (VLAN 200, CUDN 10.200.0.0/16)
+# Tenant C: hub cluster (VLAN 300, CUDN 10.150.0.0/16) — reaches A and B
+#
+# Prerequisites:
+#   ansible-playbook common/setup.yaml
+#
+# Run it with:
+#   ansible-playbook lab04-vrf-lite/lab04.yaml
+
+- name: 'Pre-check: Verify common setup is complete'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    - name: 'Check FRR-K8s pods on hub cluster'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_frr_pods
+
+    - name: 'Check FRR-K8s pods on spoke cluster'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_frr_pods
+
+    - name: 'Fail if common setup has not been run'
+      ansible.builtin.fail:
+        msg: >-
+          FRR-K8s pods are not running on both clusters.
+          Run 'ansible-playbook common/setup.yaml' first.
+      when: >
+        __hub_frr_pods.resources | length == 0 or
+        __spoke_frr_pods.resources | length == 0
+
+- name: 'Install NMState operator on hub'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Check if NMState operator is already installed'
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: kubernetes-nmstate-operator
+        namespace: openshift-nmstate
+      register: __nmstate_sub
+
+    - name: 'Install NMState operator'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/nmstate-operator.yaml"
+      when: __nmstate_sub.resources | length == 0
+
+    - name: 'Wait for NMState operator to be ready'
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: openshift-nmstate
+        label_selectors:
+          - "app=kubernetes-nmstate-operator"
+      register: __nmstate_deploy
+      until: >
+        __nmstate_deploy.resources | length > 0 and
+        __nmstate_deploy.resources[0].status.readyReplicas | default(0) > 0
+      retries: 60
+      delay: 10
+
+    - name: 'Create NMState instance'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/nmstate-instance.yaml"
+
+    - name: 'Wait for NMState handler pods to be ready'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-nmstate
+        label_selectors:
+          - "component=kubernetes-nmstate-handler"
+      register: __nmstate_handlers
+      until: >
+        __nmstate_handlers.resources | length > 0 and
+        __nmstate_handlers.resources |
+        selectattr('status.phase', 'equalto', 'Running') |
+        list | length == __nmstate_handlers.resources | length
+      retries: 60
+      delay: 10
+
+  tags: ['nmstate']
+
+- name: 'Install NMState operator on spoke'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Check if NMState operator is already installed on spoke'
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: kubernetes-nmstate-operator
+        namespace: openshift-nmstate
+      register: __spoke_nmstate_sub
+
+    - name: 'Install NMState operator on spoke'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/nmstate-operator.yaml"
+      when: __spoke_nmstate_sub.resources | length == 0
+
+    - name: 'Wait for NMState operator on spoke'
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: openshift-nmstate
+        label_selectors:
+          - "app=kubernetes-nmstate-operator"
+      register: __spoke_nmstate_deploy
+      until: >
+        __spoke_nmstate_deploy.resources | length > 0 and
+        __spoke_nmstate_deploy.resources[0].status.readyReplicas | default(0) > 0
+      retries: 60
+      delay: 10
+
+    - name: 'Create NMState instance on spoke'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/nmstate-instance.yaml"
+
+    - name: 'Wait for NMState handler pods on spoke'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-nmstate
+        label_selectors:
+          - "component=kubernetes-nmstate-handler"
+      register: __spoke_nmstate_handlers
+      until: >
+        __spoke_nmstate_handlers.resources | length > 0 and
+        __spoke_nmstate_handlers.resources |
+        selectattr('status.phase', 'equalto', 'Running') |
+        list | length == __spoke_nmstate_handlers.resources | length
+      retries: 60
+      delay: 10
+
+  tags: ['nmstate']
+
+- name: 'Configure VLAN sub-interfaces on hub nodes'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply VLAN NNCPs for hub nodes (VLAN 100, 300)'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/nncp-vlans.yaml"
+
+    - name: 'Wait for hub NNCPs to be available'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+      register: __hub_nncp
+      until: >
+        __hub_nncp.resources | length == 3 and
+        __hub_nncp.resources |
+        selectattr('status.conditions', 'defined') |
+        map(attribute='status.conditions') |
+        flatten |
+        selectattr('type', 'equalto', 'Available') |
+        selectattr('status', 'equalto', 'True') |
+        list | length == 3
+      retries: 60
+      delay: 10
+      ignore_errors: true
+
+  tags: ['vlans']
+
+- name: 'Configure VLAN sub-interface on spoke worker'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply VLAN NNCP for spoke worker (VLAN 200)'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-nncp-vlans.yaml"
+
+    - name: 'Wait for spoke NNCP to be available'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+      register: __spoke_nncp
+      until: >
+        __spoke_nncp.resources | length == 1 and
+        __spoke_nncp.resources |
+        selectattr('status.conditions', 'defined') |
+        map(attribute='status.conditions') |
+        flatten |
+        selectattr('type', 'equalto', 'Available') |
+        selectattr('status', 'equalto', 'True') |
+        list | length == 1
+      retries: 60
+      delay: 10
+      ignore_errors: true
+
+  tags: ['vlans']
+
+- name: 'Configure c8000v VRFs and sub-interfaces'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Remove existing BGP config'
+      ansible.netcommon.cli_config:
+        config: |
+          no router bgp {{ c8000v_asn }}
+          end
+      ignore_errors: true
+
+    - name: 'Push VRF configuration'
+      ansible.netcommon.cli_config:
+        config: "{{ lookup('file', playbook_dir + '/manifest/c8000v-vrf.cfg') }}"
+
+    - name: 'Verify VRF definitions'
+      ansible.netcommon.cli_command:
+        command: 'show ip vrf'
+      register: __vrf_list
+
+    - name: 'Display VRF list'
+      ansible.builtin.debug:
+        var: __vrf_list.stdout_lines
+
+  tags: ['c8000v']
+
+- name: 'Create hub tenant CUDNs and BGP peering (A + C)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply Tenant A CUDN'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-tenant-a-cudn.yaml"
+      until: result is not failed
+      retries: 5
+      delay: 10
+      register: result
+
+    - name: 'Apply Tenant C CUDN'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-tenant-c-cudn.yaml"
+      until: result is not failed
+      retries: 5
+      delay: 10
+      register: result
+
+    - name: 'Apply Tenant A BGP peering'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-tenant-a-bgp.yaml"
+      until: result is not failed
+      retries: 5
+      delay: 10
+      register: result
+
+    - name: 'Apply Tenant C BGP peering'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-tenant-c-bgp.yaml"
+      until: result is not failed
+      retries: 5
+      delay: 10
+      register: result
+
+  tags: ['tenants']
+
+- name: 'Create spoke tenant CUDN and BGP peering (B)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply Tenant B CUDN'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-tenant-b-cudn.yaml"
+      until: result is not failed
+      retries: 5
+      delay: 10
+      register: result
+
+    - name: 'Apply Tenant B BGP peering'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-tenant-b-bgp.yaml"
+      until: result is not failed
+      retries: 5
+      delay: 10
+      register: result
+
+  tags: ['tenants']
+
+- name: 'Assign VLAN interfaces to OVN VRFs on hub nodes'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Wait for OVN VRF devices to be created'
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: 'Move VLAN interfaces into tenant VRFs on each hub node'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ item }}"
+        container: frr
+        command: >-
+          nsenter -t 1 -n -- sh -c '
+          ip link set enp3s0.100 master tenant-a-net 2>/dev/null;
+          ip link set enp3s0.300 master tenant-c-net 2>/dev/null;
+          TABLE_A=$(ip vrf show | grep tenant-a | awk "{print \$2}");
+          TABLE_C=$(ip vrf show | grep tenant-c | awk "{print \$2}");
+          IP_A=$(ip -4 addr show enp3s0.100 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
+          IP_C=$(ip -4 addr show enp3s0.300 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
+          ip route replace 172.16.100.0/24 dev enp3s0.100 table $TABLE_A proto kernel scope link src $IP_A 2>/dev/null;
+          ip route replace 172.16.150.0/24 dev enp3s0.300 table $TABLE_C proto kernel scope link src $IP_C 2>/dev/null;
+          echo "Done"'
+      loop: "{{ query('kubernetes.core.k8s', api_version='v1', kind='Pod', namespace='openshift-frr-k8s', label_selector='app=frr-k8s', kubeconfig=hub_kubeconfig) | map(attribute='metadata.name') | list }}"
+      loop_control:
+        label: "{{ item }}"
+      ignore_errors: true
+
+  tags: ['vrf-assign']
+
+- name: 'Assign VLAN interface to OVN VRF on spoke worker'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Move VLAN 200 into tenant-b-net VRF on spoke'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ query('kubernetes.core.k8s', api_version='v1', kind='Pod', namespace='openshift-frr-k8s', label_selector='app=frr-k8s', kubeconfig=spoke_kubeconfig) | map(attribute='metadata.name') | first }}"
+        container: frr
+        command: >-
+          nsenter -t 1 -n -- sh -c '
+          ip link set enp3s0.200 master tenant-b-net 2>/dev/null;
+          TABLE_B=$(ip vrf show | grep tenant-b | awk "{print \$2}");
+          IP_B=$(ip -4 addr show enp3s0.200 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
+          ip route replace 172.16.200.0/24 dev enp3s0.200 table $TABLE_B proto kernel scope link src $IP_B 2>/dev/null;
+          echo "Done"'
+      ignore_errors: true
+
+  tags: ['vrf-assign']

@@ -1,0 +1,46 @@
+---
+# FRRConfiguration for Tenant C on hub — peers over VLAN 300
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: tenant-c-bgp
+  namespace: openshift-frr-k8s
+  labels:
+    network: tenant-c-net
+spec:
+  bgp:
+    routers:
+    - asn: 64515
+      vrf: tenant-c-net
+      prefixes:
+      - 10.150.0.0/16
+      neighbors:
+      - address: 172.16.150.50
+        asn: 64514
+        disableMP: true
+        toReceive:
+          allowed:
+            mode: all
+        toAdvertise:
+          allowed:
+            mode: all
+---
+# RouteAdvertisements for Tenant C — targetVRF routes to tenant-c-net VRF
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: tenant-c-routes
+spec:
+  targetVRF: tenant-c-net
+  advertisements:
+  - PodNetwork
+  networkSelectors:
+  - networkSelectionType: ClusterUserDefinedNetworks
+    clusterUserDefinedNetworkSelector:
+      networkSelector:
+        matchLabels:
+          advertise: "true"
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      network: tenant-c-net

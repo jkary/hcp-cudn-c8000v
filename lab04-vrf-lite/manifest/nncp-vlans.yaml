@@ -1,0 +1,117 @@
+---
+# VLAN sub-interfaces for hcp-master-1 (hub)
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: vlan-tenants-master-1
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: hcp-master-1
+  desiredState:
+    interfaces:
+    - name: enp3s0.100
+      type: vlan
+      state: up
+      vlan:
+        base-iface: enp3s0
+        id: 100
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: 172.16.100.61
+          prefix-length: 24
+      ipv6:
+        enabled: false
+    - name: enp3s0.300
+      type: vlan
+      state: up
+      vlan:
+        base-iface: enp3s0
+        id: 300
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: 172.16.150.61
+          prefix-length: 24
+      ipv6:
+        enabled: false
+---
+# VLAN sub-interfaces for hcp-master-2 (hub)
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: vlan-tenants-master-2
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: hcp-master-2
+  desiredState:
+    interfaces:
+    - name: enp3s0.100
+      type: vlan
+      state: up
+      vlan:
+        base-iface: enp3s0
+        id: 100
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: 172.16.100.62
+          prefix-length: 24
+      ipv6:
+        enabled: false
+    - name: enp3s0.300
+      type: vlan
+      state: up
+      vlan:
+        base-iface: enp3s0
+        id: 300
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: 172.16.150.62
+          prefix-length: 24
+      ipv6:
+        enabled: false
+---
+# VLAN sub-interfaces for hcp-master-3 (hub)
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: vlan-tenants-master-3
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: hcp-master-3
+  desiredState:
+    interfaces:
+    - name: enp3s0.100
+      type: vlan
+      state: up
+      vlan:
+        base-iface: enp3s0
+        id: 100
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: 172.16.100.63
+          prefix-length: 24
+      ipv6:
+        enabled: false
+    - name: enp3s0.300
+      type: vlan
+      state: up
+      vlan:
+        base-iface: enp3s0
+        id: 300
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: 172.16.150.63
+          prefix-length: 24
+      ipv6:
+        enabled: false

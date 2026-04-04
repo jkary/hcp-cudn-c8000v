@@ -1,0 +1,27 @@
+---
+# Tenant A namespace and CUDN on hub cluster
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cudn-tenant-a
+  labels:
+    k8s.ovn.org/primary-user-defined-network: ""
+    cudn: tenant-a
+---
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: tenant-a-net
+  labels:
+    advertise: "true"
+spec:
+  namespaceSelector:
+    matchLabels:
+      cudn: tenant-a
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+      - cidr: 10.100.0.0/16
+        hostSubnet: 24

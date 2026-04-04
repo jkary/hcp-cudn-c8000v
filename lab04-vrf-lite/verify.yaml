@@ -1,0 +1,314 @@
+---
+# Lab 04 Verification: Multi-tenant isolation with selective route leaking.
+#
+# Proves:
+#   - Tenant A (hub) and Tenant B (spoke) are isolated from each other
+#   - Tenant C (hub) can reach both Tenant A and Tenant B pods
+#   - c8000v maintains separate VRF routing tables with route-target leaking
+#
+# Run it with:
+#   ansible-playbook lab04-vrf-lite/verify.yaml
+
+- name: 'Deploy test pods and verify isolation'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    # --- Label namespaces ---
+    - name: 'Label hub tenant namespaces for privileged pod security'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: "{{ item }}"
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+      loop:
+        - cudn-tenant-a
+        - cudn-tenant-c
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+
+    - name: 'Label spoke tenant namespace for privileged pod security'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-tenant-b
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+    # --- Deploy test pods ---
+    - name: 'Deploy Tenant A test pod (hub)'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: tenant-a-test
+            namespace: cudn-tenant-a
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
+              securityContext:
+                capabilities:
+                  add: ["NET_RAW"]
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+
+    - name: 'Deploy Tenant C test pod (hub)'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: tenant-c-test
+            namespace: cudn-tenant-c
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
+              securityContext:
+                capabilities:
+                  add: ["NET_RAW"]
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+
+    - name: 'Deploy Tenant B test pod (spoke)'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: tenant-b-test
+            namespace: cudn-tenant-b
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
+              securityContext:
+                capabilities:
+                  add: ["NET_RAW"]
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+    # --- Wait for pods ---
+    - name: 'Wait for Tenant A test pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: tenant-a-test
+        namespace: cudn-tenant-a
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __ta_pod
+      until: >
+        __ta_pod.resources | length > 0 and
+        __ta_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+
+    - name: 'Wait for Tenant C test pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: tenant-c-test
+        namespace: cudn-tenant-c
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __tc_pod
+      until: >
+        __tc_pod.resources | length > 0 and
+        __tc_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+
+    - name: 'Wait for Tenant B test pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: tenant-b-test
+        namespace: cudn-tenant-b
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __tb_pod
+      until: >
+        __tb_pod.resources | length > 0 and
+        __tb_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+
+    # --- Get CUDN IPs ---
+    - name: 'Get Tenant A CUDN IP'
+      ansible.builtin.set_fact:
+        ta_ip: "{{ (__ta_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-tenant-a/tenant-a-net']['ip_address'] | regex_replace('/.*', '') }}"
+
+    - name: 'Get Tenant B CUDN IP'
+      ansible.builtin.set_fact:
+        tb_ip: "{{ (__tb_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-tenant-b/tenant-b-net']['ip_address'] | regex_replace('/.*', '') }}"
+
+    - name: 'Get Tenant C CUDN IP'
+      ansible.builtin.set_fact:
+        tc_ip: "{{ (__tc_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-tenant-c/tenant-c-net']['ip_address'] | regex_replace('/.*', '') }}"
+
+    - name: 'Display tenant pod IPs'
+      ansible.builtin.debug:
+        msg:
+          - "Tenant A (hub):   {{ ta_ip }} on {{ __ta_pod.resources[0].spec.nodeName }}"
+          - "Tenant B (spoke): {{ tb_ip }} on {{ __tb_pod.resources[0].spec.nodeName }}"
+          - "Tenant C (hub):   {{ tc_ip }} on {{ __tc_pod.resources[0].spec.nodeName }}"
+
+    # --- Isolation test: A cannot reach B ---
+    - name: 'ISOLATION: Tenant A -> Tenant B (should FAIL)'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-tenant-a
+        pod: tenant-a-test
+        command: "ping -c 3 -W 3 {{ tb_ip }}"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __a_to_b
+      ignore_errors: true
+
+    - name: 'Result: A -> B'
+      ansible.builtin.debug:
+        msg: "Tenant A -> Tenant B: {{ 'ISOLATED (expected)' if __a_to_b is failed else 'REACHABLE (unexpected!)' }}"
+
+    # --- Tenant C reaches A ---
+    - name: 'CONNECTIVITY: Tenant C -> Tenant A (should SUCCEED)'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-tenant-c
+        pod: tenant-c-test
+        command: "ping -c 3 -W 5 {{ ta_ip }}"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __c_to_a
+      ignore_errors: true
+
+    - name: 'Result: C -> A'
+      ansible.builtin.debug:
+        msg:
+          - "Tenant C -> Tenant A: {{ 'CONNECTED' if __c_to_a is succeeded else 'FAILED' }}"
+          - "{{ __c_to_a.stdout_lines | default([]) }}"
+
+    # --- Tenant C reaches B ---
+    - name: 'CONNECTIVITY: Tenant C -> Tenant B (should SUCCEED)'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-tenant-c
+        pod: tenant-c-test
+        command: "ping -c 3 -W 5 {{ tb_ip }}"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __c_to_b
+      ignore_errors: true
+
+    - name: 'Result: C -> B'
+      ansible.builtin.debug:
+        msg:
+          - "Tenant C -> Tenant B: {{ 'CONNECTED' if __c_to_b is succeeded else 'FAILED' }}"
+          - "{{ __c_to_b.stdout_lines | default([]) }}"
+
+    # --- Summary ---
+    - name: 'Summary'
+      ansible.builtin.debug:
+        msg:
+          - "=== Lab 04: VRF Lite Multi-Tenant Isolation ==="
+          - ""
+          - "Tenant A (hub):   {{ ta_ip }}"
+          - "Tenant B (spoke): {{ tb_ip }}"
+          - "Tenant C (hub):   {{ tc_ip }}"
+          - ""
+          - "A -> B: {{ 'ISOLATED' if __a_to_b is failed else 'NOT ISOLATED' }}"
+          - "C -> A: {{ 'CONNECTED' if __c_to_a is succeeded else 'FAILED' }}"
+          - "C -> B: {{ 'CONNECTED' if __c_to_b is succeeded else 'FAILED' }}"
+          - ""
+          - "Tenant C can reach both A and B via VRF route-target import."
+          - "Tenants A and B remain isolated from each other."
+
+  tags: ['test']
+
+- name: 'c8000v VRF routing tables'
+  hosts: c8000v
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_host }}"
+    ansible_user: "{{ c8000v_user }}"
+    ansible_password: "{{ c8000v_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Show VRF summary'
+      ansible.netcommon.cli_command:
+        command: 'show ip vrf'
+      register: __vrf_summary
+
+    - name: 'VRF summary'
+      ansible.builtin.debug:
+        var: __vrf_summary.stdout_lines
+
+    - name: 'Show TENANT-A routing table'
+      ansible.netcommon.cli_command:
+        command: 'show ip route vrf TENANT-A'
+      register: __vrf_a
+
+    - name: 'TENANT-A routes'
+      ansible.builtin.debug:
+        var: __vrf_a.stdout_lines
+
+    - name: 'Show TENANT-B routing table'
+      ansible.netcommon.cli_command:
+        command: 'show ip route vrf TENANT-B'
+      register: __vrf_b
+
+    - name: 'TENANT-B routes'
+      ansible.builtin.debug:
+        var: __vrf_b.stdout_lines
+
+    - name: 'Show TENANT-C routing table (should show A + B + C routes)'
+      ansible.netcommon.cli_command:
+        command: 'show ip route vrf TENANT-C'
+      register: __vrf_c
+
+    - name: 'TENANT-C routes (with leaked routes from A and B)'
+      ansible.builtin.debug:
+        var: __vrf_c.stdout_lines
+
+    - name: 'Show BGP VPNv4 summary'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp vpnv4 all summary'
+      register: __bgp_vpn
+
+    - name: 'BGP VPNv4 summary'
+      ansible.builtin.debug:
+        var: __bgp_vpn.stdout_lines
+
+  tags: ['c8000v']

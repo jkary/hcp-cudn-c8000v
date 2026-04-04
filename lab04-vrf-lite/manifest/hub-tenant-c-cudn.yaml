@@ -1,0 +1,27 @@
+---
+# Tenant C namespace and CUDN on hub cluster (shared tenant — reaches A and B)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cudn-tenant-c
+  labels:
+    k8s.ovn.org/primary-user-defined-network: ""
+    cudn: tenant-c
+---
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: tenant-c-net
+  labels:
+    advertise: "true"
+spec:
+  namespaceSelector:
+    matchLabels:
+      cudn: tenant-c
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+      - cidr: 10.150.0.0/16
+        hostSubnet: 24

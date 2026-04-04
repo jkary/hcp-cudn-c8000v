@@ -1,0 +1,27 @@
+---
+# Tenant B namespace and CUDN on spoke cluster
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cudn-tenant-b
+  labels:
+    k8s.ovn.org/primary-user-defined-network: ""
+    cudn: tenant-b
+---
+apiVersion: k8s.ovn.org/v1
+kind: ClusterUserDefinedNetwork
+metadata:
+  name: tenant-b-net
+  labels:
+    advertise: "true"
+spec:
+  namespaceSelector:
+    matchLabels:
+      cudn: tenant-b
+  network:
+    topology: Layer3
+    layer3:
+      role: Primary
+      subnets:
+      - cidr: 10.200.0.0/16
+        hostSubnet: 24
