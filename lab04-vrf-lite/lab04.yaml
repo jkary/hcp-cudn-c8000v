@@ -302,6 +302,113 @@
 
   tags: ['c8000v']
 
+- name: 'Configure c8000v-2 VRFs and sub-interfaces'
+  hosts: c8000v-2
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_2_host }}"
+    ansible_user: "{{ c8000v_2_user }}"
+    ansible_password: "{{ c8000v_2_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Remove existing BGP config on c8000v-2'
+      ansible.netcommon.cli_config:
+        config: |
+          no router bgp {{ c8000v_asn }}
+          end
+      ignore_errors: true
+
+    - name: 'Push VRF configuration to c8000v-2'
+      ansible.netcommon.cli_config:
+        config: "{{ lookup('file', playbook_dir + '/manifest/c8000v-2-vrf.cfg') }}"
+
+    - name: 'Verify VRF definitions on c8000v-2'
+      ansible.netcommon.cli_command:
+        command: 'show ip vrf'
+      register: __vrf_list_2
+
+    - name: 'Display c8000v-2 VRF list'
+      ansible.builtin.debug:
+        var: __vrf_list_2.stdout_lines
+
+  tags: ['c8000v']
+
+- name: 'Configure VLAN sub-interfaces on hub spine2 NIC'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply spine2 VLAN NNCPs for hub nodes'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/nncp-spine2-vlans.yaml"
+
+    - name: 'Wait for hub spine2 VLAN NNCPs'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+      register: __hub_spine2_nncp
+      until: >
+        __hub_spine2_nncp.resources |
+        selectattr('metadata.name', 'match', 'spine2-vlan-master') |
+        list | length == 3
+      retries: 60
+      delay: 10
+      ignore_errors: true
+
+  tags: ['vlans']
+
+- name: 'Configure VLAN sub-interface on spoke spine2 NIC'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply spine2 VLAN NNCP for spoke worker'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-nncp-spine2-vlans.yaml"
+
+    - name: 'Wait for spoke spine2 VLAN NNCP'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+        name: spine2-vlan-worker-1
+      register: __spoke_spine2_nncp
+      until: __spoke_spine2_nncp.resources | length > 0
+      retries: 60
+      delay: 10
+      ignore_errors: true
+
+  tags: ['vlans']
+
 - name: 'Create hub tenant CUDNs and BGP peering (A + C)'
   hosts: localhost
   connection: local
@@ -415,16 +522,39 @@
           nsenter -t 1 -n -- sh -c '
           ip link set enp3s0.100 master tenant-a-net 2>/dev/null;
           ip link set enp3s0.300 master tenant-c-net 2>/dev/null;
+          ip link set ens1.100 master tenant-a-net 2>/dev/null;
+          ip link set ens1.300 master tenant-c-net 2>/dev/null;
           TABLE_A=$(ip vrf show | grep tenant-a | awk "{print \$2}");
           TABLE_C=$(ip vrf show | grep tenant-c | awk "{print \$2}");
           IP_A=$(ip -4 addr show enp3s0.100 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
           IP_C=$(ip -4 addr show enp3s0.300 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
+          IP_A2=$(ip -4 addr show ens1.100 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
+          IP_C2=$(ip -4 addr show ens1.300 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
           ip route replace 172.16.100.0/24 dev enp3s0.100 table $TABLE_A proto kernel scope link src $IP_A 2>/dev/null;
           ip route replace 172.16.150.0/24 dev enp3s0.300 table $TABLE_C proto kernel scope link src $IP_C 2>/dev/null;
+          ip route replace 172.16.101.0/24 dev ens1.100 table $TABLE_A proto kernel scope link src $IP_A2 2>/dev/null;
+          ip route replace 172.16.151.0/24 dev ens1.300 table $TABLE_C proto kernel scope link src $IP_C2 2>/dev/null;
           echo "Done"'
       loop: "{{ query('kubernetes.core.k8s', api_version='v1', kind='Pod', namespace='openshift-frr-k8s', label_selector='app=frr-k8s', kubeconfig=hub_kubeconfig) | map(attribute='metadata.name') | list }}"
       loop_control:
         label: "{{ item }}"
+      ignore_errors: true
+
+    - name: 'Set VLAN tags on OVN localnet ports for hub tenants'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-ovn-kubernetes
+        pod: "{{ query('kubernetes.core.k8s', api_version='v1', kind='Pod', namespace='openshift-ovn-kubernetes', label_selector='app=ovnkube-node', kubeconfig=hub_kubeconfig) | map(attribute='metadata.name') | first }}"
+        container: ovnkube-controller
+        command: >-
+          sh -c '
+          for port in $(ovn-nbctl --columns=name find logical_switch_port type=localnet | grep "tenant.a.net" | awk -F\" "{print \$2}"); do
+            ovn-nbctl set logical_switch_port "$port" tag=100;
+          done;
+          for port in $(ovn-nbctl --columns=name find logical_switch_port type=localnet | grep "tenant.c.net" | awk -F\" "{print \$2}"); do
+            ovn-nbctl set logical_switch_port "$port" tag=300;
+          done;
+          echo "VLAN tags set";
+          ovn-nbctl --columns=name,tag find logical_switch_port type=localnet'
       ignore_errors: true
 
   tags: ['vrf-assign']
@@ -449,10 +579,27 @@
         command: >-
           nsenter -t 1 -n -- sh -c '
           ip link set enp3s0.200 master tenant-b-net 2>/dev/null;
+          ip link set ens1.200 master tenant-b-net 2>/dev/null;
           TABLE_B=$(ip vrf show | grep tenant-b | awk "{print \$2}");
           IP_B=$(ip -4 addr show enp3s0.200 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
+          IP_B2=$(ip -4 addr show ens1.200 | grep "inet " | awk "{print \$2}" | cut -d/ -f1);
           ip route replace 172.16.200.0/24 dev enp3s0.200 table $TABLE_B proto kernel scope link src $IP_B 2>/dev/null;
+          ip route replace 172.16.201.0/24 dev ens1.200 table $TABLE_B proto kernel scope link src $IP_B2 2>/dev/null;
           echo "Done"'
+      ignore_errors: true
+
+    - name: 'Set VLAN tag on OVN localnet port for spoke tenant B'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-ovn-kubernetes
+        pod: "{{ query('kubernetes.core.k8s', api_version='v1', kind='Pod', namespace='openshift-ovn-kubernetes', label_selector='app=ovnkube-node', kubeconfig=spoke_kubeconfig) | map(attribute='metadata.name') | first }}"
+        container: ovnkube-controller
+        command: >-
+          sh -c '
+          for port in $(ovn-nbctl --columns=name find logical_switch_port type=localnet | grep "tenant.b.net" | awk -F\" "{print \$2}"); do
+            ovn-nbctl set logical_switch_port "$port" tag=200;
+          done;
+          echo "VLAN tag set";
+          ovn-nbctl --columns=name,tag find logical_switch_port type=localnet | grep tenant'
       ignore_errors: true
 
   tags: ['vrf-assign']

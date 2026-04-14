@@ -32,6 +32,37 @@ spoke_node_ips:
 spoke_node_descriptions:
   - 'spoke-worker-1'
 
+# --- c8000v-2 Router (second spine) ---
+c8000v_2_host: '172.16.252.51'
+c8000v_2_host_253: '172.16.253.50'
+c8000v_2_user: 'admin'
+c8000v_2_password: 'admin123'
+
+# --- Second NIC IPs (172.16.253.0/24) ---
+hub_node_ips_253:
+  - '172.16.253.61'
+  - '172.16.253.62'
+  - '172.16.253.63'
+spoke_node_ips_253:
+  - '172.16.253.64'
+
+# --- Libvirt Infrastructure ---
+c8000v_source_qcow2: '/home/jkary/c8000v-17.06.03/virtioa.qcow2'
+c8000v_disk: '/home/libvirtd/c8000v.qcow2'
+c8000v_day0_iso: '/home/libvirtd/c8000v-day0.iso'
+c8000v_2_disk: '/home/libvirtd/c8000v-2.qcow2'
+c8000v_2_day0_iso: '/home/libvirtd/c8000v-2-day0.iso'
+# Cluster VMs and their second NIC MACs (for NMState NNCP matching)
+cluster_vms_spine2:
+  - name: 'hcp-master-1'
+    mac: 'de:ad:be:ef:53:61'
+  - name: 'hcp-master-2'
+    mac: 'de:ad:be:ef:53:62'
+  - name: 'hcp-master-3'
+    mac: 'de:ad:be:ef:53:63'
+  - name: 'hcp1-worker-1'
+    mac: 'de:ad:be:ef:53:64'
+
 # --- HCP (only relevant if spoke is a HostedCluster) ---
 spoke_hcp_name: 'spoke'
 spoke_hcp_namespace: 'spoke'

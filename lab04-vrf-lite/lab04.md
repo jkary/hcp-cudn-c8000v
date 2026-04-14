@@ -52,9 +52,10 @@ Tenant C can reach both A and B. Tenants A and B remain isolated from each other
 
 ## Prerequisites
 
-- Hub cluster deployed (OCP 4.20+)
-- `ansible-playbook common/setup.yaml` completed
+- Hub and spoke clusters deployed (OCP 4.20+)
+- `ansible-playbook common/setup.yaml` completed (creates c8000v VMs and configures FRR)
 - NMState operator will be installed automatically by the playbook
+- Note: This lab uses c8000v-1 only; it replaces its BGP config with per-VRF address-families
 
 ## Automated Deployment
 

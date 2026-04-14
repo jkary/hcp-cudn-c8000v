@@ -1,17 +1,262 @@
 ---
 # Common infrastructure setup for CUDN lab series.
 #
-# This playbook prepares the c8000v router and both clusters for any lab:
-#   - Pushes base BGP config to c8000v
+# This playbook prepares the c8000v routers and both clusters for any lab:
+#   - Creates libvirt network and c8000v VMs (if not present)
+#   - Attaches second NIC to cluster VMs for dual-spine topology
+#   - Pushes base BGP config to both c8000v routers
 #   - Enables FRR-K8s and RouteAdvertisements on hub and spoke clusters
 #
 # Run it with:
 #   ap common/setup.yaml
 #
 # Run individual phases:
-#   ap common/setup.yaml -t c8000v
-#   ap common/setup.yaml -t hub
-#   ap common/setup.yaml -t spoke
+#   ap common/setup.yaml -t infra     # Libvirt network + VMs only
+#   ap common/setup.yaml -t c8000v    # c8000v BGP config only
+#   ap common/setup.yaml -t hub       # Hub cluster only
+#   ap common/setup.yaml -t spoke     # Spoke cluster only
+
+- name: 'Infrastructure: Create lab-network-253 libvirt network'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  tasks:
+    - name: 'Check if lab-network-253 already exists'
+      ansible.builtin.command: sudo virsh net-info lab-network-253
+      register: __net253_exists
+      ignore_errors: true
+      changed_when: false
+
+    - name: 'Define lab-network-253'
+      ansible.builtin.command: >
+        sudo virsh net-define {{ playbook_dir }}/manifest/lab-network-253.xml
+      when: __net253_exists is failed
+
+    - name: 'Start lab-network-253'
+      ansible.builtin.command: sudo virsh net-start lab-network-253
+      when: __net253_exists is failed
+
+    - name: 'Set lab-network-253 to autostart'
+      ansible.builtin.command: sudo virsh net-autostart lab-network-253
+      when: __net253_exists is failed
+
+  tags: ['infra']
+
+- name: 'Infrastructure: Create c8000v-1 VM'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  tasks:
+    - name: 'Check if c8000v VM already exists'
+      ansible.builtin.command: sudo virsh dominfo c8000v
+      register: __c8000v_exists
+      ignore_errors: true
+      changed_when: false
+
+    - name: 'Create c8000v disk from template'
+      ansible.builtin.command: >
+        sudo qemu-img create -f qcow2
+        -b {{ c8000v_source_qcow2 }} -F qcow2
+        {{ c8000v_disk }}
+      when: __c8000v_exists is failed
+
+    - name: 'Create temp directory for c8000v day0'
+      ansible.builtin.tempfile:
+        state: directory
+      register: __c8000v_day0_dir
+      when: __c8000v_exists is failed
+
+    - name: 'Render c8000v day0 config'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/manifest/c8000v-day0.cfg.j2"
+        dest: "{{ __c8000v_day0_dir.path }}/iosxe_config.txt"
+        mode: '0644'
+      vars:
+        vm_hostname: c8000v
+        gi1_ip: "{{ c8000v_host }}"
+        vm_user: "{{ c8000v_user }}"
+        vm_password: "{{ c8000v_password }}"
+      when: __c8000v_exists is failed
+
+    - name: 'Generate c8000v day0 ISO'
+      ansible.builtin.command: >
+        sudo genisoimage -r -o {{ c8000v_day0_iso }}
+        {{ __c8000v_day0_dir.path }}/iosxe_config.txt
+      when: __c8000v_exists is failed
+
+    - name: 'Render c8000v VM XML'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/manifest/c8000v.xml.j2"
+        dest: /tmp/c8000v.xml
+        mode: '0644'
+      vars:
+        vm_name: c8000v
+        vm_disk: "{{ c8000v_disk }}"
+        vm_day0_iso: "{{ c8000v_day0_iso }}"
+      when: __c8000v_exists is failed
+
+    - name: 'Define c8000v VM'
+      ansible.builtin.command: sudo virsh define /tmp/c8000v.xml
+      when: __c8000v_exists is failed
+
+    - name: 'Start c8000v VM'
+      ansible.builtin.command: sudo virsh start c8000v
+      when: __c8000v_exists is failed
+
+    - name: 'Ensure c8000v is running'
+      ansible.builtin.command: sudo virsh domstate c8000v
+      register: __c8000v_state
+      changed_when: false
+
+    - name: 'Start c8000v if not running'
+      ansible.builtin.command: sudo virsh start c8000v
+      when: "'running' not in __c8000v_state.stdout"
+
+  tags: ['infra']
+
+- name: 'Infrastructure: Create c8000v-2 VM'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  tasks:
+    - name: 'Check if c8000v-2 VM already exists'
+      ansible.builtin.command: sudo virsh dominfo c8000v-2
+      register: __c8000v2_exists
+      ignore_errors: true
+      changed_when: false
+
+    - name: 'Create c8000v-2 disk from template'
+      ansible.builtin.command: >
+        sudo qemu-img create -f qcow2
+        -b {{ c8000v_source_qcow2 }} -F qcow2
+        {{ c8000v_2_disk }}
+      when: __c8000v2_exists is failed
+
+    - name: 'Create temp directory for c8000v-2 day0'
+      ansible.builtin.tempfile:
+        state: directory
+      register: __c8000v2_day0_dir
+      when: __c8000v2_exists is failed
+
+    - name: 'Render c8000v-2 day0 config'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/manifest/c8000v-day0.cfg.j2"
+        dest: "{{ __c8000v2_day0_dir.path }}/iosxe_config.txt"
+        mode: '0644'
+      vars:
+        vm_hostname: c8000v-2
+        gi1_ip: "{{ c8000v_2_host }}"
+        gi2_ip: "{{ c8000v_2_host_253 }}"
+        vm_user: "{{ c8000v_2_user }}"
+        vm_password: "{{ c8000v_2_password }}"
+      when: __c8000v2_exists is failed
+
+    - name: 'Generate c8000v-2 day0 ISO'
+      ansible.builtin.command: >
+        sudo genisoimage -r -o {{ c8000v_2_day0_iso }}
+        {{ __c8000v2_day0_dir.path }}/iosxe_config.txt
+      when: __c8000v2_exists is failed
+
+    - name: 'Render c8000v-2 VM XML'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/manifest/c8000v.xml.j2"
+        dest: /tmp/c8000v-2.xml
+        mode: '0644'
+      vars:
+        vm_name: c8000v-2
+        vm_disk: "{{ c8000v_2_disk }}"
+        vm_day0_iso: "{{ c8000v_2_day0_iso }}"
+      when: __c8000v2_exists is failed
+
+    - name: 'Define c8000v-2 VM'
+      ansible.builtin.command: sudo virsh define /tmp/c8000v-2.xml
+      when: __c8000v2_exists is failed
+
+    - name: 'Start c8000v-2 VM'
+      ansible.builtin.command: sudo virsh start c8000v-2
+      when: __c8000v2_exists is failed
+
+    - name: 'Ensure c8000v-2 is running'
+      ansible.builtin.command: sudo virsh domstate c8000v-2
+      register: __c8000v2_state
+      changed_when: false
+
+    - name: 'Start c8000v-2 if not running'
+      ansible.builtin.command: sudo virsh start c8000v-2
+      when: "'running' not in __c8000v2_state.stdout"
+
+  tags: ['infra']
+
+- name: 'Infrastructure: Attach second NIC to cluster VMs'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  tasks:
+    - name: 'Attach lab-network-253 NIC to cluster VMs'
+      ansible.builtin.shell: |
+        if sudo virsh domiflist {{ item.name }} | grep -q lab-network-253; then
+          echo "Already attached"
+        else
+          cat > /tmp/nic-spine2-{{ item.name }}.xml << 'XMLEOF'
+        <interface type='network'>
+          <source network='lab-network-253'/>
+          <model type='virtio'/>
+          <mac address='{{ item.mac }}'/>
+          <address type='pci' domain='0x0000' bus='0x06' slot='0x01' function='0x0'/>
+        </interface>
+        XMLEOF
+          sudo virsh attach-device --domain {{ item.name }} \
+            --file /tmp/nic-spine2-{{ item.name }}.xml \
+            --persistent --live
+        fi
+      loop: "{{ cluster_vms_spine2 }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: __attach_result
+      changed_when: "'Already attached' not in __attach_result.stdout"
+
+  tags: ['infra']
+
+- name: 'Infrastructure: Wait for c8000v routers to be reachable'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  tasks:
+    - name: 'Wait for c8000v-1 SSH'
+      ansible.builtin.wait_for:
+        host: "{{ c8000v_host }}"
+        port: 22
+        delay: 10
+        timeout: 300
+
+    - name: 'Wait for c8000v-2 SSH'
+      ansible.builtin.wait_for:
+        host: "{{ c8000v_2_host }}"
+        port: 22
+        delay: 10
+        timeout: 300
+
+  tags: ['infra']
 
 - name: 'Configure c8000v base BGP'
   hosts: c8000v
@@ -28,6 +273,8 @@
     ansible_password: "{{ c8000v_password | default(omit) }}"
     ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
     ansible_paramiko_look_for_keys: false
+    ibgp_peer: "{{ c8000v_2_host }}"
+    ibgp_peer_name: c8000v-2-ibgp
 
   tasks:
     - name: 'Render and push BGP configuration to c8000v'
@@ -42,6 +289,53 @@
     - name: 'Display BGP summary'
       ansible.builtin.debug:
         var: __bgp_summary.stdout_lines
+
+  tags: ['c8000v']
+
+- name: 'Configure c8000v-2 base BGP'
+  hosts: c8000v-2
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_2_host }}"
+    ansible_user: "{{ c8000v_2_user }}"
+    ansible_password: "{{ c8000v_2_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+    ansible_paramiko_look_for_keys: false
+
+  tasks:
+    - name: 'Set c8000v-2 template variables'
+      ansible.builtin.set_fact:
+        _router_id: "{{ c8000v_2_host_253 }}"
+        _hub_ips: "{{ hub_node_ips_253 }}"
+        _spoke_ips: "{{ spoke_node_ips_253 }}"
+        _asn: "{{ c8000v_asn }}"
+        _ibgp_peer: "{{ c8000v_host }}"
+
+    - name: 'Render and push BGP configuration to c8000v-2'
+      ansible.netcommon.cli_config:
+        config: "{{ lookup('template', playbook_dir + '/manifest/c8000v-bgp-base.cfg.j2') }}"
+      vars:
+        c8000v_host: "{{ _router_id }}"
+        hub_node_ips: "{{ _hub_ips }}"
+        spoke_node_ips: "{{ _spoke_ips }}"
+        c8000v_asn: "{{ _asn }}"
+        ibgp_peer: "{{ _ibgp_peer }}"
+        ibgp_peer_name: c8000v-1-ibgp
+
+    - name: 'Verify BGP is configured on c8000v-2'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp summary'
+      register: __bgp_summary_2
+
+    - name: 'Display c8000v-2 BGP summary'
+      ansible.builtin.debug:
+        var: __bgp_summary_2.stdout_lines
 
   tags: ['c8000v']
 

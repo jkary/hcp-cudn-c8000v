@@ -1,0 +1,30 @@
+hostname {{ vm_hostname }}
+ip domain name lab.local
+!
+interface GigabitEthernet1
+ ip address {{ gi1_ip }} 255.255.255.0
+ no shutdown
+!
+{% if gi2_ip is defined %}
+interface GigabitEthernet2
+ ip address {{ gi2_ip }} 255.255.255.0
+ no shutdown
+!
+{% endif %}
+ip route 0.0.0.0 0.0.0.0 172.16.252.1
+!
+aaa new-model
+aaa authentication login default local
+aaa authorization exec default local
+!
+username {{ vm_user }} privilege 15 secret {{ vm_password }}
+!
+line vty 0 4
+ transport input ssh
+ login local
+!
+crypto key generate rsa modulus 4096
+!
+ip ssh version 2
+!
+end

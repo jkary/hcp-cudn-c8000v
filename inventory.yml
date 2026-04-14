@@ -7,3 +7,7 @@ all:
       ansible_connection: ansible.netcommon.network_cli
       ansible_network_os: cisco.ios.ios
       ansible_network_cli_ssh_type: paramiko
+    c8000v-2:
+      ansible_connection: ansible.netcommon.network_cli
+      ansible_network_os: cisco.ios.ios
+      ansible_network_cli_ssh_type: paramiko

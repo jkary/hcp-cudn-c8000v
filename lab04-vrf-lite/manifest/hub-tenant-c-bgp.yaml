@@ -1,5 +1,6 @@
 ---
-# FRRConfiguration for Tenant C on hub — peers over VLAN 300
+# FRRConfiguration for Tenant C on hub — peers over VLAN 300 in tenant VRF
+# Uses AS 64515 to avoid AS-path loop when c8000v leaks routes from tenant A/B
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
@@ -10,7 +11,7 @@ metadata:
 spec:
   bgp:
     routers:
-    - asn: 64515
+    - asn: 64512
       vrf: tenant-c-net
       prefixes:
       - 10.150.0.0/16
@@ -24,8 +25,26 @@ spec:
         toAdvertise:
           allowed:
             mode: all
+      - address: 172.16.151.50
+        asn: 64514
+        disableMP: true
+        toReceive:
+          allowed:
+            mode: all
+        toAdvertise:
+          allowed:
+            mode: all
+  raw:
+    priority: 100
+    rawConfig: |
+      router bgp 64512 vrf tenant-c-net
+       address-family ipv4 unicast
+        neighbor 172.16.150.50 allowas-in
+        neighbor 172.16.151.50 allowas-in
+       exit-address-family
+      exit
 ---
-# RouteAdvertisements for Tenant C — targetVRF routes to tenant-c-net VRF
+# RouteAdvertisements for Tenant C — targetVRF keeps routes in tenant VRF
 apiVersion: k8s.ovn.org/v1
 kind: RouteAdvertisements
 metadata:

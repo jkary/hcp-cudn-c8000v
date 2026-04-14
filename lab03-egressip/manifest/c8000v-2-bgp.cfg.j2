@@ -1,0 +1,15 @@
+! c8000v-2: iBGP peering with c8000v-1 + eBGP to clusters on 172.16.253.0/24
+router bgp {{ c8000v_asn }}
+ !
+ ! iBGP peer: c8000v-1
+ neighbor {{ c8000v_host }} remote-as {{ c8000v_asn }}
+ neighbor {{ c8000v_host }} description c8000v-1-ibgp
+ neighbor {{ c8000v_host }} next-hop-self
+ !
+ address-family ipv4 unicast
+  neighbor {{ c8000v_host }} activate
+  maximum-paths 3
+  maximum-paths ibgp 2
+ exit-address-family
+!
+end

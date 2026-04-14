@@ -1,0 +1,13 @@
+<network>
+  <name>lab-network-253</name>
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='lab-net253' stp='on' delay='0'/>
+  <domain name='lab.local' localOnly='no'/>
+  <dns enable='no'/>
+  <ip family='ipv4' address='172.16.253.1' prefix='24'>
+  </ip>
+</network>

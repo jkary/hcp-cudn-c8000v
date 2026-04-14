@@ -8,6 +8,7 @@
 #   ap common/teardown.yaml -t hub
 #   ap common/teardown.yaml -t spoke
 #   ap common/teardown.yaml -t c8000v
+#   ap common/teardown.yaml -t infra   # Remove c8000v-2 VM, second NICs, lab-network-253
 
 - name: 'Teardown hub cluster CUDN resources'
   hosts: localhost
@@ -33,37 +34,53 @@
         - cudn-hub-ns
       ignore_errors: true
 
-    - name: 'Delete hub RouteAdvertisements'
+    - name: 'Delete all hub RouteAdvertisements'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: RouteAdvertisements
-        name: hub-cudn-routes
+        name: "{{ item }}"
+      loop:
+        - hub-cudn-routes
+        - tenant-a-routes
+        - tenant-c-routes
       ignore_errors: true
 
-    - name: 'Delete hub FRRConfiguration'
+    - name: 'Delete all hub FRRConfigurations'
       kubernetes.core.k8s:
         state: absent
         api_version: frrk8s.metallb.io/v1beta1
         kind: FRRConfiguration
-        name: hub-bgp
+        name: "{{ item }}"
         namespace: openshift-frr-k8s
+      loop:
+        - hub-bgp
+        - tenant-a-bgp
+        - tenant-c-bgp
       ignore_errors: true
 
-    - name: 'Delete hub ClusterUserDefinedNetwork'
+    - name: 'Delete hub ClusterUserDefinedNetworks'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: ClusterUserDefinedNetwork
-        name: hub-network
+        name: "{{ item }}"
+      loop:
+        - hub-network
+        - tenant-a-network
+        - tenant-c-network
       ignore_errors: true
 
-    - name: 'Delete hub CUDN namespace'
+    - name: 'Delete hub CUDN namespaces'
       kubernetes.core.k8s:
         state: absent
         api_version: v1
         kind: Namespace
-        name: cudn-hub-ns
+        name: "{{ item }}"
+      loop:
+        - cudn-hub-ns
+        - tenant-a-ns
+        - tenant-c-ns
       ignore_errors: true
 
   tags: ['hub']
@@ -92,37 +109,49 @@
         - cudn-spoke-ns
       ignore_errors: true
 
-    - name: 'Delete spoke RouteAdvertisements'
+    - name: 'Delete all spoke RouteAdvertisements'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: RouteAdvertisements
-        name: spoke-cudn-routes
+        name: "{{ item }}"
+      loop:
+        - spoke-cudn-routes
+        - tenant-b-routes
       ignore_errors: true
 
-    - name: 'Delete spoke FRRConfiguration'
+    - name: 'Delete all spoke FRRConfigurations'
       kubernetes.core.k8s:
         state: absent
         api_version: frrk8s.metallb.io/v1beta1
         kind: FRRConfiguration
-        name: spoke-bgp
+        name: "{{ item }}"
         namespace: openshift-frr-k8s
+      loop:
+        - spoke-bgp
+        - tenant-b-bgp
       ignore_errors: true
 
-    - name: 'Delete spoke ClusterUserDefinedNetwork'
+    - name: 'Delete spoke ClusterUserDefinedNetworks'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: ClusterUserDefinedNetwork
-        name: spoke-network
+        name: "{{ item }}"
+      loop:
+        - spoke-network
+        - tenant-b-network
       ignore_errors: true
 
-    - name: 'Delete spoke CUDN namespace'
+    - name: 'Delete spoke CUDN namespaces'
       kubernetes.core.k8s:
         state: absent
         api_version: v1
         kind: Namespace
-        name: cudn-spoke-ns
+        name: "{{ item }}"
+      loop:
+        - cudn-spoke-ns
+        - tenant-b-ns
       ignore_errors: true
 
   tags: ['spoke']
@@ -158,3 +187,88 @@
         var: __bgp_summary.stdout_lines
 
   tags: ['c8000v']
+
+- name: 'Teardown c8000v-2 BGP configuration'
+  hosts: c8000v-2
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars_files:
+    - manifest/vars.yaml
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_host: "{{ c8000v_2_host }}"
+    ansible_user: "{{ c8000v_2_user }}"
+    ansible_password: "{{ c8000v_2_password | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
+
+  tasks:
+    - name: 'Remove BGP configuration from c8000v-2'
+      ansible.netcommon.cli_config:
+        config: "no router bgp {{ c8000v_asn }}"
+
+    - name: 'Verify BGP is removed on c8000v-2'
+      ansible.netcommon.cli_command:
+        command: 'show ip bgp summary'
+      register: __bgp_summary_2
+      ignore_errors: true
+
+    - name: 'Display c8000v-2 BGP summary'
+      ansible.builtin.debug:
+        var: __bgp_summary_2.stdout_lines
+
+  tags: ['c8000v']
+
+- name: 'Teardown: Remove infrastructure (c8000v-2, second NICs, lab-network-253)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  tasks:
+    - name: 'Stop c8000v-2 VM'
+      ansible.builtin.command: sudo virsh destroy c8000v-2
+      ignore_errors: true
+
+    - name: 'Undefine c8000v-2 VM'
+      ansible.builtin.command: sudo virsh undefine c8000v-2
+      ignore_errors: true
+
+    - name: 'Remove c8000v-2 disk'
+      ansible.builtin.file:
+        path: "{{ c8000v_2_disk }}"
+        state: absent
+      become: true
+
+    - name: 'Remove c8000v-2 day0 ISO'
+      ansible.builtin.file:
+        path: "{{ c8000v_2_day0_iso }}"
+        state: absent
+      become: true
+
+    - name: 'Detach lab-network-253 NIC from cluster VMs'
+      ansible.builtin.shell: |
+        if sudo virsh domiflist {{ item.name }} | grep -q lab-network-253; then
+          sudo virsh detach-interface --domain {{ item.name }} \
+            --type network --mac {{ item.mac }} \
+            --persistent --live
+        else
+          echo "Not attached"
+        fi
+      loop: "{{ cluster_vms_spine2 }}"
+      loop_control:
+        label: "{{ item.name }}"
+      ignore_errors: true
+
+    - name: 'Destroy lab-network-253'
+      ansible.builtin.command: sudo virsh net-destroy lab-network-253
+      ignore_errors: true
+
+    - name: 'Undefine lab-network-253'
+      ansible.builtin.command: sudo virsh net-undefine lab-network-253
+      ignore_errors: true
+
+  tags: ['infra']

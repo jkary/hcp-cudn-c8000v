@@ -1,0 +1,15 @@
+! c8000v-1: ECMP + iBGP peering with c8000v-2
+router bgp {{ c8000v_asn }}
+ !
+ ! iBGP peer: c8000v-2
+ neighbor {{ c8000v_2_host }} remote-as {{ c8000v_asn }}
+ neighbor {{ c8000v_2_host }} description c8000v-2-ibgp
+ neighbor {{ c8000v_2_host }} next-hop-self
+ !
+ address-family ipv4 unicast
+  neighbor {{ c8000v_2_host }} activate
+  maximum-paths 3
+  maximum-paths ibgp 2
+ exit-address-family
+!
+end

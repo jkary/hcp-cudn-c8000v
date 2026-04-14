@@ -4,15 +4,17 @@ This guide sets up cross-cluster pod networking between a hub (management) and s
 
 ## Network Design
 
+This lab uses c8000v-1 (on `lab-network`) for BGP peering. The dual-spine topology (c8000v-2 on `lab-network-253`) is created by `common/setup.yaml` but used in lab03.
+
 ```
                   +-----------------+
-                  |    c8000v       |
+                  |    c8000v-1     |
                   |  AS 64514       |
                   |  172.16.252.50  |
                   +--------+--------+
                            |
             +--------------+--------------+
-            |         L2 Network          |
+            |     lab-network             |
             |      172.16.252.0/24        |
             +--+------+------+------+----+
                |      |      |      |
@@ -35,13 +37,13 @@ This guide sets up cross-cluster pod networking between a hub (management) and s
 |-----------|-----|-----------|----------|
 | Hub cluster | 64512 | 10.100.0.0/16 (/24 per node) | 172.16.252.61-63 |
 | Spoke cluster | 64513 | 10.200.0.0/16 (/24 per node) | 172.16.252.64 |
-| c8000v router | 64514 | N/A | 172.16.252.50 |
+| c8000v-1 | 64514 | N/A | 172.16.252.50 |
+| c8000v-2 | 64514 | N/A | 172.16.253.50 (used in lab03) |
 
 ## Prerequisites
 
 - Hub and spoke clusters deployed (OCP 4.20+)
-- c8000v router running on KVM with an interface on the 172.16.252.0/24 network
-- Both clusters share the same L2 network
+- `ansible-playbook common/setup.yaml` completed (creates c8000v VMs and configures FRR)
 
 ## Step-by-Step Reproduction
 

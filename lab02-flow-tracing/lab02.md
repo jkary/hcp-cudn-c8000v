@@ -19,7 +19,7 @@ Trace cross-cluster ICMP packet flows at each hop using tshark. Deploys capture 
 ## Architecture
 
 ```
-Hub capture pod          c8000v (BGP relay)        Spoke capture pod
+Hub capture pod          c8000v-1 (BGP relay)      Spoke capture pod
 10.100.x.x/24           172.16.252.50              10.200.0.x/24
     |                        |                          |
   ovn-udn1               GigabitEthernet1            ovn-udn1
@@ -28,7 +28,7 @@ Hub capture pod          c8000v (BGP relay)        Spoke capture pod
   capture                  BGP table                 capture
 ```
 
-The capture pods are identical to lab01 test pods but with `NET_RAW` capability added, allowing tshark/tcpdump to capture on the CUDN interface.
+Traffic flows through c8000v-1 on `lab-network`. The capture pods are identical to lab01 test pods but with `NET_RAW` capability added, allowing tshark/tcpdump to capture on the CUDN interface.
 
 ## Automated Deployment
 

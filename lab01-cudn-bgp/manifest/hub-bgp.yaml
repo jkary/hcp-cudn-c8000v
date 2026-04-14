@@ -21,6 +21,15 @@ spec:
         toAdvertise:
           allowed:
             mode: all
+      - address: 172.16.253.50
+        asn: 64514
+        disableMP: true
+        toReceive:
+          allowed:
+            mode: all
+        toAdvertise:
+          allowed:
+            mode: all
 ---
 # RouteAdvertisements to bridge FRR-K8s routes into OVN for CUDN routing
 apiVersion: k8s.ovn.org/v1

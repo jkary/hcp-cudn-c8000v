@@ -1,0 +1,26 @@
+---
+# VLAN sub-interface on second NIC (spine2/ens1) for spoke worker.
+# Tenant B: VLAN 200 on 172.16.201.0/24
+apiVersion: nmstate.io/v1
+kind: NodeNetworkConfigurationPolicy
+metadata:
+  name: spine2-vlan-worker-1
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: hcp1-worker-1
+  desiredState:
+    interfaces:
+    - name: ens1.200
+      type: vlan
+      state: up
+      vlan:
+        base-iface: ens1
+        id: 200
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: 172.16.201.64
+          prefix-length: 24
+      ipv6:
+        enabled: false

@@ -18,6 +18,13 @@ router bgp {{ c8000v_asn }}
  neighbor {{ spoke_node_ips[i] }} description {{ spoke_node_descriptions[i] }}
 {% endfor %}
 {% endif %}
+{% if ibgp_peer is defined %}
+ !
+ ! iBGP peer (dual-spine)
+ neighbor {{ ibgp_peer }} remote-as {{ c8000v_asn }}
+ neighbor {{ ibgp_peer }} description {{ ibgp_peer_name | default('ibgp-peer') }}
+ neighbor {{ ibgp_peer }} next-hop-self
+{% endif %}
  !
  address-family ipv4 unicast
 {% for ip in hub_node_ips %}
@@ -26,6 +33,11 @@ router bgp {{ c8000v_asn }}
 {% for ip in spoke_node_ips | default([]) %}
   neighbor {{ ip }} activate
 {% endfor %}
+{% if ibgp_peer is defined %}
+  neighbor {{ ibgp_peer }} activate
+  maximum-paths ibgp 2
+{% endif %}
+  maximum-paths {{ hub_node_ips | length }}
  exit-address-family
 !
 end

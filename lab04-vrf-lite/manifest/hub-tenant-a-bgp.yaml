@@ -1,6 +1,5 @@
 ---
-# FRRConfiguration for Tenant A on hub — peers over VLAN 100
-# The VRF router entry is required for targetVRF on RouteAdvertisements
+# FRRConfiguration for Tenant A on hub — peers over VLAN 100 in tenant VRF
 apiVersion: frrk8s.metallb.io/v1beta1
 kind: FRRConfiguration
 metadata:
@@ -25,8 +24,17 @@ spec:
         toAdvertise:
           allowed:
             mode: all
+      - address: 172.16.101.50
+        asn: 64514
+        disableMP: true
+        toReceive:
+          allowed:
+            mode: all
+        toAdvertise:
+          allowed:
+            mode: all
 ---
-# RouteAdvertisements for Tenant A — targetVRF routes to tenant-a-net VRF
+# RouteAdvertisements for Tenant A — targetVRF keeps routes in tenant VRF
 apiVersion: k8s.ovn.org/v1
 kind: RouteAdvertisements
 metadata:

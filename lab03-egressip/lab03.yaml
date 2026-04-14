@@ -1,5 +1,8 @@
 ---
-# Lab 03: EgressIP and ECMP Load Balancing
+# Lab 03: EgressIP and Dual-Spine ECMP Load Balancing
+#
+# Topology: Two c8000v routers (AS 64514, iBGP) on separate L2 segments.
+# Each cluster node is dual-homed to both routers for ECMP.
 #
 # Prerequisites:
 #   ansible-playbook common/setup.yaml
@@ -8,6 +11,7 @@
 #   ansible-playbook lab03-egressip/lab03.yaml
 #
 # Individual phases:
+#   ansible-playbook lab03-egressip/lab03.yaml -t nmstate
 #   ansible-playbook lab03-egressip/lab03.yaml -t hub
 #   ansible-playbook lab03-egressip/lab03.yaml -t spoke
 #   ansible-playbook lab03-egressip/lab03.yaml -t c8000v
@@ -51,6 +55,207 @@
       when: >
         __hub_frr_pods.resources | length == 0 or
         __spoke_frr_pods.resources | length == 0
+
+- name: 'Install NMState operator on hub'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Check if NMState operator is already installed'
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: kubernetes-nmstate-operator
+        namespace: openshift-nmstate
+      register: __nmstate_sub
+
+    - name: 'Install NMState operator'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/../lab04-vrf-lite/manifest/nmstate-operator.yaml"
+      when: __nmstate_sub.resources | length == 0
+
+    - name: 'Wait for NMState operator to be ready'
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: openshift-nmstate
+        label_selectors:
+          - "app=kubernetes-nmstate-operator"
+      register: __nmstate_deploy
+      until: >
+        __nmstate_deploy.resources | length > 0 and
+        __nmstate_deploy.resources[0].status.readyReplicas | default(0) > 0
+      retries: 60
+      delay: 10
+
+    - name: 'Create NMState instance'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/../lab04-vrf-lite/manifest/nmstate-instance.yaml"
+
+    - name: 'Wait for NMState handler pods to be ready'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-nmstate
+        label_selectors:
+          - "component=kubernetes-nmstate-handler"
+      register: __nmstate_handlers
+      until: >
+        __nmstate_handlers.resources | length > 0 and
+        __nmstate_handlers.resources |
+        selectattr('status.phase', 'equalto', 'Running') |
+        list | length == __nmstate_handlers.resources | length
+      retries: 60
+      delay: 10
+
+  tags: ['nmstate']
+
+- name: 'Install NMState operator on spoke'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Check if NMState operator is already installed on spoke'
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: kubernetes-nmstate-operator
+        namespace: openshift-nmstate
+      register: __spoke_nmstate_sub
+
+    - name: 'Install NMState operator on spoke'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/../lab04-vrf-lite/manifest/nmstate-operator.yaml"
+      when: __spoke_nmstate_sub.resources | length == 0
+
+    - name: 'Wait for NMState operator on spoke'
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: openshift-nmstate
+        label_selectors:
+          - "app=kubernetes-nmstate-operator"
+      register: __spoke_nmstate_deploy
+      until: >
+        __spoke_nmstate_deploy.resources | length > 0 and
+        __spoke_nmstate_deploy.resources[0].status.readyReplicas | default(0) > 0
+      retries: 60
+      delay: 10
+
+    - name: 'Create NMState instance on spoke'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/../lab04-vrf-lite/manifest/nmstate-instance.yaml"
+
+    - name: 'Wait for NMState handler pods on spoke'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-nmstate
+        label_selectors:
+          - "component=kubernetes-nmstate-handler"
+      register: __spoke_nmstate_handlers
+      until: >
+        __spoke_nmstate_handlers.resources | length > 0 and
+        __spoke_nmstate_handlers.resources |
+        selectattr('status.phase', 'equalto', 'Running') |
+        list | length == __spoke_nmstate_handlers.resources | length
+      retries: 60
+      delay: 10
+
+  tags: ['nmstate']
+
+- name: 'Configure second NIC IPs on hub nodes (NNCPs)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply spine2 NNCPs for hub nodes'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/nncp-spine2.yaml"
+
+    - name: 'Wait for hub spine2 NNCPs to be available'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+        label_selectors: []
+      register: __hub_nncp
+      until: >
+        __hub_nncp.resources |
+        selectattr('metadata.name', 'match', 'spine2-master') |
+        list | length == 3
+      retries: 60
+      delay: 10
+      ignore_errors: true
+
+  tags: ['nmstate']
+
+- name: 'Configure second NIC IP on spoke worker (NNCP)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply spine2 NNCP for spoke worker'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/spoke-nncp-spine2.yaml"
+
+    - name: 'Wait for spoke spine2 NNCP to be available'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+        name: spine2-worker-1
+      register: __spoke_nncp
+      until: __spoke_nncp.resources | length > 0
+      retries: 60
+      delay: 10
+      ignore_errors: true
+
+  tags: ['nmstate']
 
 - name: 'Hub cluster - Label nodes as egress-assignable'
   hosts: localhost
@@ -187,34 +392,3 @@
 
   tags: ['spoke']
 
-- name: 'Configure c8000v ECMP'
-  hosts: c8000v
-  gather_facts: false
-  connection: ansible.netcommon.network_cli
-
-  vars_files:
-    - ../common/manifest/vars.yaml
-
-  vars:
-    ansible_network_os: cisco.ios.ios
-    ansible_host: "{{ c8000v_host }}"
-    ansible_user: "{{ c8000v_user }}"
-    ansible_password: "{{ c8000v_password | default(omit) }}"
-    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
-    ansible_paramiko_look_for_keys: false
-
-  tasks:
-    - name: 'Push ECMP configuration to c8000v'
-      ansible.netcommon.cli_config:
-        config: "{{ lookup('file', playbook_dir + '/manifest/c8000v-ecmp.cfg') }}"
-
-    - name: 'Verify ECMP routing table'
-      ansible.netcommon.cli_command:
-        command: 'show ip route bgp'
-      register: __ecmp_routes
-
-    - name: 'Display ECMP routes'
-      ansible.builtin.debug:
-        var: __ecmp_routes.stdout_lines
-
-  tags: ['c8000v']
