@@ -365,6 +365,62 @@
             defaultNetwork:
               ovnKubernetesConfig:
                 routeAdvertisements: Enabled
+                gatewayConfig:
+                  ipForwarding: Global
+
+    - name: 'Apply MachineConfig for loose reverse path filtering'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: machineconfiguration.openshift.io/v1
+          kind: MachineConfig
+          metadata:
+            labels:
+              machineconfiguration.openshift.io/role: master
+            name: 99-cudn-rp-filter
+          spec:
+            config:
+              ignition:
+                version: 3.2.0
+              storage:
+                files:
+                - contents:
+                    source: "data:text/plain;charset=utf-8;base64,bmV0LmlwdjQuY29uZi5hbGwucnBfZmlsdGVyID0gMgpuZXQuaXB2NC5jb25mLmRlZmF1bHQucnBfZmlsdGVyID0gMgo="
+                  mode: 0644
+                  path: /etc/sysctl.d/99-cudn-rp-filter.conf
+
+    - name: 'Wait for master MachineConfigPool to start updating'
+      kubernetes.core.k8s_info:
+        api_version: machineconfiguration.openshift.io/v1
+        kind: MachineConfigPool
+        name: master
+      register: __hub_mcp
+      until: >
+        __hub_mcp.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Updating') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+        or
+        (__hub_mcp.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Updated') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0)
+      retries: 30
+      delay: 10
+
+    - name: 'Wait for master MachineConfigPool to finish rolling out'
+      kubernetes.core.k8s_info:
+        api_version: machineconfiguration.openshift.io/v1
+        kind: MachineConfigPool
+        name: master
+      register: __hub_mcp_done
+      until: >
+        __hub_mcp_done.resources[0].status.conditions |
+        selectattr('type', 'equalto', 'Updated') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+      retries: 120
+      delay: 30
 
     - name: 'Wait for network operator to stabilize'
       kubernetes.core.k8s_info:
@@ -460,6 +516,8 @@
             defaultNetwork:
               ovnKubernetesConfig:
                 routeAdvertisements: Enabled
+                gatewayConfig:
+                  ipForwarding: Global
       register: __spoke_network_patch
       until: __spoke_network_patch is not failed
       retries: 5
@@ -494,5 +552,89 @@
         list | length == __spoke_frr_pods.resources | length
       retries: 60
       delay: 10
+
+  tags: ['spoke']
+
+- name: 'Spoke cluster - Apply MachineConfig for loose RPF via NodePool'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Create ConfigMap with MachineConfig for spoke RPF'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: cudn-rp-filter
+            namespace: "{{ spoke_hcp_namespace }}"
+          data:
+            config: |
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: MachineConfig
+              metadata:
+                labels:
+                  machineconfiguration.openshift.io/role: worker
+                name: 99-cudn-rp-filter
+              spec:
+                config:
+                  ignition:
+                    version: 3.2.0
+                  storage:
+                    files:
+                    - contents:
+                        source: "data:text/plain;charset=utf-8;base64,bmV0LmlwdjQuY29uZi5hbGwucnBfZmlsdGVyID0gMgpuZXQuaXB2NC5jb25mLmRlZmF1bHQucnBfZmlsdGVyID0gMgo="
+                      mode: 0644
+                      path: /etc/sysctl.d/99-cudn-rp-filter.conf
+
+    - name: 'Get current NodePool config'
+      kubernetes.core.k8s_info:
+        api_version: hypershift.openshift.io/v1beta1
+        kind: NodePool
+        namespace: "{{ spoke_hcp_namespace }}"
+      register: __spoke_nodepool
+
+    - name: 'Patch NodePool to reference MachineConfig ConfigMap'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: hypershift.openshift.io/v1beta1
+        kind: NodePool
+        name: "{{ __spoke_nodepool.resources[0].metadata.name }}"
+        namespace: "{{ spoke_hcp_namespace }}"
+        definition:
+          spec:
+            config:
+            - name: cudn-rp-filter
+      when: >
+        __spoke_nodepool.resources | length > 0
+        and ('config' not in __spoke_nodepool.resources[0].spec
+        or __spoke_nodepool.resources[0].spec.config |
+        selectattr('name', 'equalto', 'cudn-rp-filter') |
+        list | length == 0)
+
+    - name: 'Wait for spoke NodePool update to roll out'
+      kubernetes.core.k8s_info:
+        api_version: hypershift.openshift.io/v1beta1
+        kind: NodePool
+        name: "{{ __spoke_nodepool.resources[0].metadata.name }}"
+        namespace: "{{ spoke_hcp_namespace }}"
+      register: __spoke_np_status
+      until: >
+        __spoke_np_status.resources[0].status.conditions |
+        default([]) |
+        selectattr('type', 'equalto', 'Ready') |
+        selectattr('status', 'equalto', 'True') |
+        list | length > 0
+      retries: 120
+      delay: 30
+      when: __spoke_nodepool.resources | length > 0
 
   tags: ['spoke']

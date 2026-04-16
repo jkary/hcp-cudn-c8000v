@@ -1,6 +1,10 @@
 ---
 # Teardown: Remove CUDN resources and reset clusters between labs.
 #
+# Discovers and deletes all lab resources dynamically rather than by name,
+# waits for namespaces to fully terminate, and restarts ovnkube-node to
+# clean up stale VRF devices and ip rules left behind by OVN.
+#
 # Run it with:
 #   ap common/teardown.yaml
 #
@@ -22,66 +26,149 @@
     KUBECONFIG: "{{ hub_kubeconfig }}"
 
   tasks:
+    - name: 'Find all CUDN namespaces on hub'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        label_selectors:
+          - "k8s.ovn.org/primary-user-defined-network"
+      register: __hub_cudn_ns
+
     - name: 'Delete test pods in hub CUDN namespaces'
       kubernetes.core.k8s:
         state: absent
         api_version: v1
         kind: Pod
-        namespace: "{{ item }}"
+        namespace: "{{ item.metadata.name }}"
         label_selectors:
           - "app=cudn-test"
-      loop:
-        - cudn-hub-ns
+      loop: "{{ __hub_cudn_ns.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Find all hub RouteAdvertisements'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: RouteAdvertisements
+      register: __hub_ra
 
     - name: 'Delete all hub RouteAdvertisements'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: RouteAdvertisements
-        name: "{{ item }}"
-      loop:
-        - hub-cudn-routes
-        - tenant-a-routes
-        - tenant-c-routes
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __hub_ra.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Find all hub FRRConfigurations'
+      kubernetes.core.k8s_info:
+        api_version: frrk8s.metallb.io/v1beta1
+        kind: FRRConfiguration
+        namespace: openshift-frr-k8s
+      register: __hub_frr
 
     - name: 'Delete all hub FRRConfigurations'
       kubernetes.core.k8s:
         state: absent
         api_version: frrk8s.metallb.io/v1beta1
         kind: FRRConfiguration
-        name: "{{ item }}"
+        name: "{{ item.metadata.name }}"
         namespace: openshift-frr-k8s
-      loop:
-        - hub-bgp
-        - tenant-a-bgp
-        - tenant-c-bgp
+      loop: "{{ __hub_frr.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
 
-    - name: 'Delete hub ClusterUserDefinedNetworks'
+    - name: 'Find all hub ClusterUserDefinedNetworks'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: ClusterUserDefinedNetwork
+      register: __hub_cudn
+
+    - name: 'Delete all hub ClusterUserDefinedNetworks'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: ClusterUserDefinedNetwork
-        name: "{{ item }}"
-      loop:
-        - hub-network
-        - tenant-a-network
-        - tenant-c-network
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __hub_cudn.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Find all hub NNCPs'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+      register: __hub_nncp
+      ignore_errors: true
+
+    - name: 'Delete all hub NNCPs'
+      kubernetes.core.k8s:
+        state: absent
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __hub_nncp.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      ignore_errors: true
+      when: __hub_nncp is succeeded
 
     - name: 'Delete hub CUDN namespaces'
       kubernetes.core.k8s:
         state: absent
         api_version: v1
         kind: Namespace
-        name: "{{ item }}"
-      loop:
-        - cudn-hub-ns
-        - tenant-a-ns
-        - tenant-c-ns
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __hub_cudn_ns.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Wait for hub CUDN namespaces to terminate'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        label_selectors:
+          - "k8s.ovn.org/primary-user-defined-network"
+      register: __hub_remaining_ns
+      until: __hub_remaining_ns.resources | length == 0
+      retries: 12
+      delay: 10
+      ignore_errors: true
+
+    - name: 'Force-clear stuck hub namespace finalizers'
+      ansible.builtin.shell: |
+        oc get ns {{ item.metadata.name }} -o json | \
+          python3 -c 'import json,sys; ns=json.load(sys.stdin); ns["spec"]["finalizers"]=[]; print(json.dumps(ns))' | \
+          oc replace --raw "/api/v1/namespaces/{{ item.metadata.name }}/finalize" -f -
+      loop: "{{ __hub_remaining_ns.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: __hub_remaining_ns.resources | length > 0
+      ignore_errors: true
+
+    - name: 'Confirm hub CUDN namespaces are gone'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        label_selectors:
+          - "k8s.ovn.org/primary-user-defined-network"
+      register: __hub_final_ns
+      until: __hub_final_ns.resources | length == 0
+      retries: 6
+      delay: 5
+
+    - name: 'Restart hub ovnkube-node to clean up stale VRF devices'
+      ansible.builtin.command: oc rollout restart daemonset/ovnkube-node -n openshift-ovn-kubernetes
+
+    - name: 'Wait for hub ovnkube-node rollout to complete'
+      ansible.builtin.command: oc rollout status daemonset/ovnkube-node -n openshift-ovn-kubernetes --timeout=300s
 
   tags: ['hub']
 
@@ -97,62 +184,149 @@
     KUBECONFIG: "{{ spoke_kubeconfig }}"
 
   tasks:
+    - name: 'Find all CUDN namespaces on spoke'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        label_selectors:
+          - "k8s.ovn.org/primary-user-defined-network"
+      register: __spoke_cudn_ns
+
     - name: 'Delete test pods in spoke CUDN namespaces'
       kubernetes.core.k8s:
         state: absent
         api_version: v1
         kind: Pod
-        namespace: "{{ item }}"
+        namespace: "{{ item.metadata.name }}"
         label_selectors:
           - "app=cudn-test"
-      loop:
-        - cudn-spoke-ns
+      loop: "{{ __spoke_cudn_ns.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Find all spoke RouteAdvertisements'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: RouteAdvertisements
+      register: __spoke_ra
 
     - name: 'Delete all spoke RouteAdvertisements'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: RouteAdvertisements
-        name: "{{ item }}"
-      loop:
-        - spoke-cudn-routes
-        - tenant-b-routes
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __spoke_ra.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Find all spoke FRRConfigurations'
+      kubernetes.core.k8s_info:
+        api_version: frrk8s.metallb.io/v1beta1
+        kind: FRRConfiguration
+        namespace: openshift-frr-k8s
+      register: __spoke_frr
 
     - name: 'Delete all spoke FRRConfigurations'
       kubernetes.core.k8s:
         state: absent
         api_version: frrk8s.metallb.io/v1beta1
         kind: FRRConfiguration
-        name: "{{ item }}"
+        name: "{{ item.metadata.name }}"
         namespace: openshift-frr-k8s
-      loop:
-        - spoke-bgp
-        - tenant-b-bgp
+      loop: "{{ __spoke_frr.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
 
-    - name: 'Delete spoke ClusterUserDefinedNetworks'
+    - name: 'Find all spoke ClusterUserDefinedNetworks'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: ClusterUserDefinedNetwork
+      register: __spoke_cudn
+
+    - name: 'Delete all spoke ClusterUserDefinedNetworks'
       kubernetes.core.k8s:
         state: absent
         api_version: k8s.ovn.org/v1
         kind: ClusterUserDefinedNetwork
-        name: "{{ item }}"
-      loop:
-        - spoke-network
-        - tenant-b-network
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __spoke_cudn.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Find all spoke NNCPs'
+      kubernetes.core.k8s_info:
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+      register: __spoke_nncp
+      ignore_errors: true
+
+    - name: 'Delete all spoke NNCPs'
+      kubernetes.core.k8s:
+        state: absent
+        api_version: nmstate.io/v1
+        kind: NodeNetworkConfigurationPolicy
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __spoke_nncp.resources | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      ignore_errors: true
+      when: __spoke_nncp is succeeded
 
     - name: 'Delete spoke CUDN namespaces'
       kubernetes.core.k8s:
         state: absent
         api_version: v1
         kind: Namespace
-        name: "{{ item }}"
-      loop:
-        - cudn-spoke-ns
-        - tenant-b-ns
+        name: "{{ item.metadata.name }}"
+      loop: "{{ __spoke_cudn_ns.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       ignore_errors: true
+
+    - name: 'Wait for spoke CUDN namespaces to terminate'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        label_selectors:
+          - "k8s.ovn.org/primary-user-defined-network"
+      register: __spoke_remaining_ns
+      until: __spoke_remaining_ns.resources | length == 0
+      retries: 12
+      delay: 10
+      ignore_errors: true
+
+    - name: 'Force-clear stuck spoke namespace finalizers'
+      ansible.builtin.shell: |
+        oc get ns {{ item.metadata.name }} -o json | \
+          python3 -c 'import json,sys; ns=json.load(sys.stdin); ns["spec"]["finalizers"]=[]; print(json.dumps(ns))' | \
+          oc replace --raw "/api/v1/namespaces/{{ item.metadata.name }}/finalize" -f -
+      loop: "{{ __spoke_remaining_ns.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: __spoke_remaining_ns.resources | length > 0
+      ignore_errors: true
+
+    - name: 'Confirm spoke CUDN namespaces are gone'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        label_selectors:
+          - "k8s.ovn.org/primary-user-defined-network"
+      register: __spoke_final_ns
+      until: __spoke_final_ns.resources | length == 0
+      retries: 6
+      delay: 5
+
+    - name: 'Restart spoke ovnkube-node to clean up stale VRF devices'
+      ansible.builtin.command: oc rollout restart daemonset/ovnkube-node -n openshift-ovn-kubernetes
+
+    - name: 'Wait for spoke ovnkube-node rollout to complete'
+      ansible.builtin.command: oc rollout status daemonset/ovnkube-node -n openshift-ovn-kubernetes --timeout=300s
 
   tags: ['spoke']
 
