@@ -4,41 +4,42 @@ This guide sets up cross-cluster pod networking between a hub (management) and s
 
 ## Network Design
 
-This lab uses c8000v-1 (on `lab-network`) for BGP peering. The dual-spine topology (c8000v-2 on `lab-network-253`) is created by `common/setup.yaml` but used in lab03.
+All nodes are dual-homed to both c8000v spines. The two routers share AS 64514 and peer via iBGP, providing ECMP for cross-cluster traffic.
 
 ```
-                  +-----------------+
-                  |    c8000v-1     |
-                  |  AS 64514       |
-                  |  172.16.252.50  |
-                  +--------+--------+
-                           |
-            +--------------+--------------+
-            |     lab-network             |
-            |      172.16.252.0/24        |
-            +--+------+------+------+----+
-               |      |      |      |
-            .61|   .62|   .63|   .64|
-          +----+----+ |      | +----+----+
-          | master-1| |      | | worker-1|
-          +---------+ |      | +---------+
-          +----+----+ |      |   Spoke
-          | master-2|-+      |   AS 64513
-          +---------+        |   CUDN: 10.200.0.0/16
-          +----+----+        |
-          | master-3|--------+
-          +---------+
-            Hub
-            AS 64512
-            CUDN: 10.100.0.0/16
+                              Spines (AS 64514)
+      +-------------------+        iBGP        +-------------------+
+      |     c8000v-1      |<------------------>|     c8000v-2      |
+      |  172.16.252.50    |                    |  172.16.253.50    |
+      +--+----+----+---+-+                     +-------------------+
+       /   \     \     \                        /  /    /  \
+      /    -+-----+--- -+--------------------- /  /    /    \
+     /    /  \     \     \                       /    /      \
+    /    /    \     \   --+----------------------    /        \
+    |    |     \     \  |  \                        |          \
+    |    |      \     --+--+----------------------  |           --------
+    |    |       ----   |     \                  |  |                  |
+    |    |          |   |      ------------------+--+---------------   |
+    |    |          |   |                        |  |              |   |
+   +------+        +------+                       +------+        +------+
+   |  M1  |        |  M2  |                       |  M3  |        |  W1  |
+   |  .61 |        |  .62 |                       |  .63 |        |  .64 |
+   +------+        +------+                       +------+        +------+
+                              Leaves
+
+  Hub Cluster (AS 64512)                Spoke (AS 64513)
+  CUDN: 10.100.0.0/16                  CUDN: 10.200.0.0/16
+
+  lab-network:     172.16.252.0/24 (c8000v-1 <-> leaves)
+  lab-network-253: 172.16.253.0/24 (c8000v-2 <-> leaves)
 ```
 
 | Component | ASN | CUDN CIDR | Node IPs |
 |-----------|-----|-----------|----------|
-| Hub cluster | 64512 | 10.100.0.0/16 (/24 per node) | 172.16.252.61-63 |
-| Spoke cluster | 64513 | 10.200.0.0/16 (/24 per node) | 172.16.252.64 |
+| Hub cluster | 64512 | 10.100.0.0/16 (/24 per node) | 172.16.252.61-63, 172.16.253.61-63 |
+| Spoke cluster | 64513 | 10.200.0.0/16 (/24 per node) | 172.16.252.64, 172.16.253.64 |
 | c8000v-1 | 64514 | N/A | 172.16.252.50 |
-| c8000v-2 | 64514 | N/A | 172.16.253.50 (used in lab03) |
+| c8000v-2 | 64514 | N/A | 172.16.253.50, iBGP peer 172.16.252.51 |
 
 ## Prerequisites
 
@@ -49,7 +50,9 @@ This lab uses c8000v-1 (on `lab-network`) for BGP peering. The dual-spine topolo
 
 ### Phase 1: Configure c8000v BGP
 
-SSH to the c8000v and apply the BGP configuration:
+Both c8000v routers are configured automatically by `common/setup.yaml` using the Jinja2 template `common/manifest/c8000v-bgp-base.cfg.j2`. To apply manually, SSH to each router:
+
+**c8000v-1** (172.16.252.50):
 
 ```bash
 ssh admin@172.16.252.50
@@ -62,34 +65,72 @@ configure terminal
 router bgp 64514
  bgp router-id 172.16.252.50
  bgp log-neighbor-changes
+ ! Hub cluster nodes (AS 64512)
  neighbor 172.16.252.61 remote-as 64512
  neighbor 172.16.252.61 description hub-master-0
  neighbor 172.16.252.62 remote-as 64512
  neighbor 172.16.252.62 description hub-master-1
  neighbor 172.16.252.63 remote-as 64512
  neighbor 172.16.252.63 description hub-master-2
+ ! Spoke cluster node (AS 64513)
  neighbor 172.16.252.64 remote-as 64513
  neighbor 172.16.252.64 description spoke-worker-1
+ ! iBGP peer (dual-spine)
+ neighbor 172.16.252.51 remote-as 64514
+ neighbor 172.16.252.51 description c8000v-2
+ neighbor 172.16.252.51 next-hop-self
+ !
  address-family ipv4 unicast
   neighbor 172.16.252.61 activate
   neighbor 172.16.252.62 activate
   neighbor 172.16.252.63 activate
   neighbor 172.16.252.64 activate
+  neighbor 172.16.252.51 activate
+  maximum-paths ibgp 2
+  maximum-paths 3
  exit-address-family
 end
 
 write memory
 ```
 
-Verify:
+**c8000v-2** (172.16.253.50) has a mirrored configuration on the `lab-network-253` subnet, with its iBGP peer pointing back to c8000v-1 at 172.16.252.50.
+
+Verify on either router:
 
 ```
 show ip bgp summary
 ```
 
-All neighbors will show `Idle` until the clusters have FRR-K8s configured.
+All neighbors will show `Idle` until the clusters have FRR-K8s configured. The iBGP peer should come up once both routers are configured.
 
-### Phase 2: Hub Cluster - Enable FRR and Route Advertisements
+### Phase 2: Install NMState and Configure Second NICs
+
+The dual-spine topology requires each node to have an IP on the `lab-network-253` (172.16.253.0/24) subnet. The lab playbook installs NMState on both clusters and applies NNCPs to configure the second NIC. To do this manually:
+
+```bash
+# Hub cluster
+export KUBECONFIG=/home/jkary/labs/hcp/deploy/auth/kubeconfig
+oc apply -f common/manifest/nmstate-operator.yaml
+oc apply -f common/manifest/nmstate-instance.yaml
+oc apply -f lab01-cudn-bgp/manifest/nncp-spine2.yaml
+
+# Spoke cluster
+export KUBECONFIG=/home/jkary/labs/hcp/spoke/auth/kubeconfig
+oc apply -f common/manifest/nmstate-operator.yaml
+oc apply -f common/manifest/nmstate-instance.yaml
+oc apply -f lab01-cudn-bgp/manifest/spoke-nncp-spine2.yaml
+```
+
+Verify NNCPs are applied:
+
+```bash
+oc get nncp
+```
+
+All policies should show `Available`.
+
+### Phase 3: Hub Cluster - Enable FRR and Route Advertisements
 
 Set KUBECONFIG to the hub cluster:
 
@@ -147,7 +188,7 @@ oc apply -f lab01-cudn-bgp/manifest/hub-bgp.yaml
 ```
 
 This creates:
-- **FRRConfiguration** `hub-bgp` in `openshift-frr-k8s` namespace — establishes eBGP session from AS 64512 to c8000v at AS 64514, advertises 10.100.0.0/16 prefix
+- **FRRConfiguration** `hub-bgp` in `openshift-frr-k8s` namespace — establishes eBGP sessions from AS 64512 to both c8000v spines (AS 64514), advertises 10.100.0.0/16 prefix
 - **RouteAdvertisements** `hub-cudn-routes` — tells OVN to integrate FRR-learned routes into the CUDN data plane, selecting CUDNs with label `advertise: "true"`
 
 Verify BGP sessions:
@@ -158,7 +199,7 @@ oc get bgpsessionstates -n openshift-frr-k8s
 
 All nodes should show `Established`.
 
-### Phase 3: Spoke Cluster - Enable FRR and Route Advertisements
+### Phase 4: Spoke Cluster - Enable FRR and Route Advertisements
 
 Set KUBECONFIG to the spoke cluster:
 
@@ -205,28 +246,41 @@ oc get bgpsessionstates -n openshift-frr-k8s
 oc get routeadvertisements spoke-cudn-routes -o jsonpath='{.status}'
 ```
 
-### Phase 4: Verification
+### Phase 5: Verification
 
 #### Check c8000v BGP routes
 
 ```
-show ip bgp summary    # all 4 neighbors should be Established
-show ip bgp            # should show 10.100.x.0/24 and 10.200.0.0/24 routes
+show ip bgp summary    # 5 neighbors: 3 hub, 1 spoke, 1 iBGP peer — all Established
+show ip bgp            # should show 10.100.x.0/24 and 10.200.0.0/24 with multipath and iBGP entries
 ```
 
-Expected output:
+Expected output (from c8000v-1, showing multipath and iBGP entries):
 
 ```
      Network          Next Hop            Metric LocPrf Weight Path
- *>   10.100.0.0/24    172.16.252.62            0             0 64512 i
- *>   10.100.0.0/16    172.16.252.61            0             0 64512 i
- *>   10.100.1.0/24    172.16.252.61            0             0 64512 i
- *>   10.100.2.0/24    172.16.252.63            0             0 64512 i
- *>   10.200.0.0/24    172.16.252.64            0             0 64513 i
+ *m   10.100.0.0/24    172.16.252.62            0             0 64512 i
+ *>                    172.16.252.61            0             0 64512 i
+ * i                   172.16.252.51            0    100      0 64512 i
+ *m   10.100.0.0/16    172.16.252.62            0             0 64512 i
+ *>                    172.16.252.61            0             0 64512 i
+ *m                    172.16.252.63            0             0 64512 i
+ * i                   172.16.252.51            0    100      0 64512 i
+ *m   10.100.1.0/24    172.16.252.61            0             0 64512 i
+ * i                   172.16.252.51            0    100      0 64512 i
+ *>                    172.16.252.63            0             0 64512 i
+ *m   10.100.2.0/24    172.16.252.62            0             0 64512 i
+ * i                   172.16.252.51            0    100      0 64512 i
+ *>                    172.16.252.63            0             0 64512 i
+ * i  10.200.0.0/24    172.16.252.51            0    100      0 64513 i
+ *>                    172.16.252.64            0             0 64513 i
  *>   10.200.0.0/16    172.16.252.64            0             0 64513 i
+ * i                   172.16.252.51            0    100      0 64513 i
 ```
 
-The /24 subnets are per-node allocations advertised by RouteAdvertisements. The /16 aggregates come from the FRRConfiguration `prefixes` field.
+- `*>` = best path, `*m` = multipath (ECMP), `* i` = iBGP-learned via c8000v-2
+- The /24 subnets are per-node allocations advertised by RouteAdvertisements
+- The /16 aggregates come from the FRRConfiguration `prefixes` field
 
 #### Deploy test pods
 
@@ -339,6 +393,10 @@ The pod's default route goes through the CUDN interface, so cross-cluster traffi
 | `lab01-cudn-bgp/manifest/hub-bgp.yaml` | Hub FRRConfiguration + RouteAdvertisements |
 | `lab01-cudn-bgp/manifest/spoke-cudn.yaml` | Spoke namespace + ClusterUserDefinedNetwork |
 | `lab01-cudn-bgp/manifest/spoke-bgp.yaml` | Spoke FRRConfiguration + RouteAdvertisements |
+| `lab01-cudn-bgp/manifest/nncp-spine2.yaml` | NNCPs for hub nodes on lab-network-253 |
+| `lab01-cudn-bgp/manifest/spoke-nncp-spine2.yaml` | NNCP for spoke worker on lab-network-253 |
+| `common/manifest/nmstate-operator.yaml` | NMState operator Subscription + OperatorGroup |
+| `common/manifest/nmstate-instance.yaml` | NMState CR instance |
 | `lab01-cudn-bgp/manifest/test-pods.yaml` | Test pods for verification |
 
 ## Automated Deployment
@@ -357,6 +415,7 @@ ansible-playbook lab01-cudn-bgp/lab01.yaml
 ansible-playbook lab01-cudn-bgp/verify.yaml
 
 # Individual phases
+ansible-playbook lab01-cudn-bgp/lab01.yaml -t nmstate   # NMState + NNCPs only
 ansible-playbook lab01-cudn-bgp/lab01.yaml -t hub       # Hub CUDN + BGP only
 ansible-playbook lab01-cudn-bgp/lab01.yaml -t spoke     # Spoke CUDN + BGP only
 ```

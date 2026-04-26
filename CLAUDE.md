@@ -8,6 +8,8 @@ A series of labs demonstrating cross-cluster pod networking on OpenShift (OCP 4.
 
 ## Architecture
 
+The **hub cluster** (M1–M3) serves as both its own control plane and hosts the control plane for the **spoke cluster** via Hosted Control Planes (HCP). The spoke's only infrastructure is a single worker node (W1). Despite sharing the same physical network, hub and spoke are separate OpenShift clusters with independent pod networks — BGP routing connects them.
+
 Three BGP autonomous systems with a dual-spine router topology:
 
 - **Hub cluster** (AS 64512): 3 master nodes, CUDN 10.100.0.0/16, dual-homed to both spines
@@ -25,27 +27,27 @@ All labs require `common/setup.yaml` first. Lab 02 (flow tracing) additionally r
 
 ## Key Commands
 
-`ap` is a shell alias for `ansible-playbook`.
-
 ```bash
 # Common setup (required before any lab)
-ap common/setup.yaml              # Full setup: infra + c8000v BGP + cluster FRR
-ap common/setup.yaml -t infra     # Libvirt network, VMs, second NICs only
-ap common/setup.yaml -t c8000v    # c8000v BGP config only
-ap common/setup.yaml -t hub       # Hub cluster only
-ap common/setup.yaml -t spoke     # Spoke cluster only
+ansible-playbook common/setup.yaml              # Full setup: infra + c8000v BGP + cluster FRR
+ansible-playbook common/setup.yaml -t infra     # Libvirt network, VMs, second NICs only
+ansible-playbook common/setup.yaml -t c8000v    # c8000v BGP config only
+ansible-playbook common/setup.yaml -t hub       # Hub cluster only
+ansible-playbook common/setup.yaml -t spoke     # Spoke cluster only
 
 # Run a lab
-ap lab01-cudn-bgp/lab01.yaml
-ap lab01-cudn-bgp/verify.yaml
+ansible-playbook lab01-cudn-bgp/lab01.yaml
+ansible-playbook lab01-cudn-bgp/verify.yaml
 
 # Apply manifests via kustomize
 oc apply -k lab01-cudn-bgp/manifest/
 
 # Teardown between labs
-ap common/teardown.yaml
-ap common/teardown.yaml -t infra  # Remove c8000v-2, second NICs, lab-network-253
+ansible-playbook common/teardown.yaml
+ansible-playbook common/teardown.yaml -t infra  # Remove c8000v-2, second NICs, lab-network-253
 ```
+
+The common setup is idempotent — it skips VM creation if VMs already exist and skips NIC attachment if already present.
 
 ## Required Ansible Collections
 
@@ -54,7 +56,7 @@ ap common/teardown.yaml -t infra  # Remove c8000v-2, second NICs, lab-network-25
 ## Design Patterns
 
 - **All site-specific values in `common/manifest/vars.yaml`** — IPs, ASNs, CIDRs, kubeconfig paths. Playbooks load this via `vars_files`.
-- **Pre-check + fail fast** — lab playbooks verify FRR pods are running before proceeding. If not: "Run `ap common/setup.yaml` first."
+- **Pre-check + fail fast** — lab playbooks verify FRR pods are running before proceeding. If not: "Run `ansible-playbook common/setup.yaml` first."
 - **Kustomize: common base + per-lab overlays** — each lab's `manifest/kustomization.yaml` references `../../common/manifest` and adds lab-specific resources.
 - **VM vs cluster separation** — c8000v config (`.cfg`/`.cfg.j2` files) is IOS syntax pushed via `ansible.netcommon.cli_config`. K8s manifests (`.yaml`) are applied via `kubernetes.core.k8s`.
 - **c8000v config is a Jinja2 template** (`c8000v-bgp-base.cfg.j2`) rendered at runtime from vars. Lab-specific IOS configs are additive snippets except lab04 (VRF) which replaces the entire BGP config.

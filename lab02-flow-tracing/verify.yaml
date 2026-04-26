@@ -49,6 +49,29 @@
         - "Hub test pod:  {{ hub_test_ip }}"
         - "Spoke test pod: {{ spoke_test_ip }}"
 
+    # --- Kill stale iperf3 from previous runs ---
+    - name: 'Clean up stale iperf3 on hub'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "sh -c 'pkill iperf3 2>/dev/null; true'"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      ignore_errors: true
+
+    - name: 'Clean up stale iperf3 on spoke'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: "sh -c 'pkill iperf3 2>/dev/null; true'"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      ignore_errors: true
+
+    - name: 'Wait for port 5201 to release'
+      ansible.builtin.pause:
+        seconds: 2
+
     # --- Hub -> Spoke: iperf3 + tcpdump ---
     - name: 'Start iperf3 server on spoke'
       kubernetes.core.k8s_exec:
@@ -63,7 +86,7 @@
         namespace: cudn-hub-ns
         pod: hub-test
         command: >-
-          sh -c 'iperf3 -c {{ spoke_test_ip }} -t 10 > /tmp/iperf3.log 2>&1 &
+          sh -c 'timeout 30 iperf3 -c {{ spoke_test_ip }} -t 3 > /tmp/iperf3.log 2>&1 &
           IPERF_PID=$!;
           timeout 20 tcpdump -i ovn-udn1 -nn -c 50 tcp port 5201;
           wait $IPERF_PID 2>/dev/null; true'
@@ -96,7 +119,7 @@
         namespace: cudn-spoke-ns
         pod: spoke-test
         command: >-
-          sh -c 'iperf3 -c {{ hub_test_ip }} -t 10 > /tmp/iperf3.log 2>&1 &
+          sh -c 'timeout 30 iperf3 -c {{ hub_test_ip }} -t 3 > /tmp/iperf3.log 2>&1 &
           IPERF_PID=$!;
           timeout 20 tcpdump -i ovn-udn1 -nn -c 50 tcp port 5201;
           wait $IPERF_PID 2>/dev/null; true'
@@ -132,6 +155,18 @@
       ansible.builtin.debug:
         msg: "{{ __spoke_capture.stdout_lines | default(['No capture data']) }}"
 
+    # --- Summary ---
+    - name: 'Lab 02 traffic summary'
+      vars:
+        hub_iperf: "{{ 'PASS' if (__hub_iperf3.stdout | default('')) is search('receiver') else 'FAIL' }}"
+        hub_tcpd: "{{ 'PASS' if (__hub_capture.stdout_lines | default([]) | length) > 1 else 'FAIL' }}"
+        spoke_iperf: "{{ 'PASS' if (__spoke_iperf3.stdout | default('')) is search('receiver') else 'FAIL' }}"
+        spoke_tcpd: "{{ 'PASS' if (__spoke_capture.stdout_lines | default([]) | length) > 1 else 'FAIL' }}"
+      ansible.builtin.debug:
+        msg:
+          - "Hub->Spoke iperf3: {{ hub_iperf }}  |  tcpdump: {{ hub_tcpd }}"
+          - "Spoke->Hub iperf3: {{ spoke_iperf }}  |  tcpdump: {{ spoke_tcpd }}"
+
   tags: ['trace']
 
 - name: 'c8000v routing perspective'
@@ -150,12 +185,12 @@
     ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
 
   tasks:
-    - name: 'Show c8000v BGP routes'
+    - name: 'C8000V Show ip bgp (Routes in BGP)'
       ansible.netcommon.cli_command:
         command: 'show ip bgp'
       register: __bgp_routes
 
-    - name: 'Show c8000v routing table for CUDN prefixes'
+    - name: 'C8000V Show ip route bgp (Routes in RIB)'
       ansible.netcommon.cli_command:
         command: 'show ip route bgp'
       register: __ip_routes
@@ -165,11 +200,11 @@
         command: 'show interfaces GigabitEthernet1 | include packets'
       register: __iface_counters
 
-    - name: 'c8000v BGP routes'
+    - name: 'c8000v BGP route database'
       ansible.builtin.debug:
         var: __bgp_routes.stdout_lines
 
-    - name: 'c8000v BGP routing table'
+    - name: 'c8000v BGP entries in routing table'
       ansible.builtin.debug:
         var: __ip_routes.stdout_lines
 
@@ -177,4 +212,82 @@
       ansible.builtin.debug:
         var: __iface_counters.stdout_lines
 
+    - name: 'c8000v routing summary'
+      vars:
+        bgp_ok: "{{ 'PASS' if (__bgp_routes.stdout | default('')) is search('10\\.100\\.') else 'FAIL' }}"
+        route_ok: "{{ 'PASS' if (__ip_routes.stdout | default('')) is search('10\\.100\\.') else 'FAIL' }}"
+      ansible.builtin.debug:
+        msg:
+          - "BGP table has CUDN prefixes: {{ bgp_ok }}  |  RIB has CUDN routes: {{ route_ok }}"
+
   tags: ['c8000v']
+
+- name: 'Hub FRR - show spoke routes (10.200.x.x)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Get a hub FRR pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __hub_frr_pods
+
+    - name: 'Show BGP routes on hub FRR pod'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ __hub_frr_pods.resources[0].metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp ipv4 unicast'"
+      register: __hub_frr_routes
+
+    - name: 'Hub FRR BGP routes (expect spoke 10.200.x.x prefixes)'
+      ansible.builtin.debug:
+        msg: "{{ __hub_frr_routes.stdout_lines }}"
+
+  tags: ['frr']
+
+- name: 'Spoke FRR - show hub routes (10.100.x.x)'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Get a spoke FRR pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __spoke_frr_pods
+
+    - name: 'Show BGP routes on spoke FRR pod'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ __spoke_frr_pods.resources[0].metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp ipv4 unicast'"
+      register: __spoke_frr_routes
+
+    - name: 'Spoke FRR BGP routes (expect hub 10.100.x.x prefixes)'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_frr_routes.stdout_lines }}"
+
+  tags: ['frr']

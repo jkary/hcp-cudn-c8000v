@@ -4,6 +4,7 @@
 
 # --- c8000v Router ---
 c8000v_host: '172.16.252.50'
+c8000v_host_253: '172.16.253.51'
 c8000v_user: 'admin'
 c8000v_password: 'admin123'
 c8000v_asn: 64514
@@ -45,6 +46,12 @@ hub_node_ips_253:
   - '172.16.253.63'
 spoke_node_ips_253:
   - '172.16.253.64'
+
+# --- Libvirt Networks ---
+libvirt_network_name: 'lab-network'
+libvirt_network_cidr: '172.16.252.0/24'
+libvirt_network_253_name: 'lab-network-253'
+libvirt_network_253_cidr: '172.16.253.0/24'
 
 # --- Libvirt Infrastructure ---
 c8000v_source_qcow2: '/home/jkary/c8000v-17.06.03/virtioa.qcow2'

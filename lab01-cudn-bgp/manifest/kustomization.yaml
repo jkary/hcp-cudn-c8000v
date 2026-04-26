@@ -12,3 +12,4 @@ resources:
   - hub-bgp.yaml
   - spoke-cudn.yaml
   - spoke-bgp.yaml
+  - spoke-nncp-spine2.yaml

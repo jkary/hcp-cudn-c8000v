@@ -82,6 +82,7 @@
       vars:
         vm_hostname: c8000v
         gi1_ip: "{{ c8000v_host }}"
+        gi2_ip: "{{ c8000v_host_253 }}"
         vm_user: "{{ c8000v_user }}"
         vm_password: "{{ c8000v_password }}"
       when: __c8000v_exists is failed
@@ -277,9 +278,21 @@
     ibgp_peer_name: c8000v-2-ibgp
 
   tasks:
+    - name: 'Build neighbor lists for c8000v-1 (hub on 252, spoke on 253)'
+      ansible.builtin.set_fact:
+        _all_hub_ips: "{{ hub_node_ips }}"
+        _all_hub_descs: "{{ hub_node_descriptions }}"
+        _all_spoke_ips: "{{ spoke_node_ips_253 }}"
+        _all_spoke_descs: "{{ spoke_node_descriptions | map('regex_replace', '$', '-spine2') | list }}"
+
     - name: 'Render and push BGP configuration to c8000v'
       ansible.netcommon.cli_config:
         config: "{{ lookup('template', playbook_dir + '/manifest/c8000v-bgp-base.cfg.j2') }}"
+      vars:
+        hub_node_ips: "{{ _all_hub_ips }}"
+        hub_node_descriptions: "{{ _all_hub_descs }}"
+        spoke_node_ips: "{{ _all_spoke_ips }}"
+        spoke_node_descriptions: "{{ _all_spoke_descs }}"
 
     - name: 'Verify BGP is configured on c8000v'
       ansible.netcommon.cli_command:
@@ -309,12 +322,13 @@
     ansible_paramiko_look_for_keys: false
 
   tasks:
-    - name: 'Set c8000v-2 template variables'
+    - name: 'Build neighbor lists for c8000v-2 (hub on 252, spoke on 253)'
       ansible.builtin.set_fact:
         _router_id: "{{ c8000v_2_host_253 }}"
-        _hub_ips: "{{ hub_node_ips_253 }}"
-        _spoke_ips: "{{ spoke_node_ips_253 }}"
-        _asn: "{{ c8000v_asn }}"
+        _all_hub_ips: "{{ hub_node_ips }}"
+        _all_hub_descs: "{{ hub_node_descriptions }}"
+        _all_spoke_ips: "{{ spoke_node_ips_253 }}"
+        _all_spoke_descs: "{{ spoke_node_descriptions | map('regex_replace', '$', '-spine2') | list }}"
         _ibgp_peer: "{{ c8000v_host }}"
 
     - name: 'Render and push BGP configuration to c8000v-2'
@@ -322,9 +336,10 @@
         config: "{{ lookup('template', playbook_dir + '/manifest/c8000v-bgp-base.cfg.j2') }}"
       vars:
         c8000v_host: "{{ _router_id }}"
-        hub_node_ips: "{{ _hub_ips }}"
-        spoke_node_ips: "{{ _spoke_ips }}"
-        c8000v_asn: "{{ _asn }}"
+        hub_node_ips: "{{ _all_hub_ips }}"
+        hub_node_descriptions: "{{ _all_hub_descs }}"
+        spoke_node_ips: "{{ _all_spoke_ips }}"
+        spoke_node_descriptions: "{{ _all_spoke_descs }}"
         ibgp_peer: "{{ _ibgp_peer }}"
         ibgp_peer_name: c8000v-1-ibgp
 

@@ -9,6 +9,7 @@ router bgp {{ c8000v_asn }}
 {% for i in range(hub_node_ips | length) %}
  neighbor {{ hub_node_ips[i] }} remote-as {{ hub_asn }}
  neighbor {{ hub_node_ips[i] }} description {{ hub_node_descriptions[i] }}
+ neighbor {{ hub_node_ips[i] }} next-hop-self
 {% endfor %}
 {% if spoke_node_ips is defined %}
  !
@@ -16,6 +17,7 @@ router bgp {{ c8000v_asn }}
 {% for i in range(spoke_node_ips | length) %}
  neighbor {{ spoke_node_ips[i] }} remote-as {{ spoke_asn }}
  neighbor {{ spoke_node_ips[i] }} description {{ spoke_node_descriptions[i] }}
+ neighbor {{ spoke_node_ips[i] }} next-hop-self
 {% endfor %}
 {% endif %}
 {% if ibgp_peer is defined %}

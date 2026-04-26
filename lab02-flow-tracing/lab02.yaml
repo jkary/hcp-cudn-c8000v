@@ -141,15 +141,14 @@
       kubernetes.core.k8s_exec:
         namespace: cudn-hub-ns
         pod: hub-capture
-        command: "tcpdump -c 1 -i ovn-udn1 -w /dev/null"
+        command: "tcpdump -D"
       environment:
         KUBECONFIG: "{{ hub_kubeconfig }}"
       register: __hub_cap_test
       ignore_errors: true
-      timeout: 10
       tags: ['hub']
 
     - name: 'Display capture capability result'
       ansible.builtin.debug:
-        msg: "Hub capture: {{ 'OK' if __hub_cap_test is succeeded else 'FAILED - check NET_RAW capability' }}"
+        msg: "Hub capture: {{ 'OK' if __hub_cap_test is succeeded and 'ovn-udn1' in __hub_cap_test.stdout | default('') else 'FAILED - check NET_RAW capability' }}"
       tags: ['hub']
