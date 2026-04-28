@@ -106,10 +106,28 @@
       delay: 10
       ignore_errors: true
 
-    - name: 'Display hub BGP state'
+    - name: 'Get hub FRR pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __hub_frr_pod
+
+    - name: 'Show hub BGP session summary'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ __hub_frr_pod.resources[0].metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp summary'"
+      register: __hub_bgp_summary
+      ignore_errors: true
+
+    - name: 'Hub BGP sessions'
       ansible.builtin.debug:
-        var: __hub_bgp_state.resources
-      when: __hub_bgp_state is defined
+        msg: "{{ __hub_bgp_summary.stdout_lines }}"
+      when: __hub_bgp_summary is succeeded
 
   tags: ['hub']
 
@@ -168,9 +186,27 @@
       delay: 10
       ignore_errors: true
 
-    - name: 'Display spoke BGP state'
+    - name: 'Get spoke FRR pod'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __spoke_frr_pod
+
+    - name: 'Show spoke BGP session summary'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ __spoke_frr_pod.resources[0].metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp summary'"
+      register: __spoke_bgp_summary
+      ignore_errors: true
+
+    - name: 'Spoke BGP sessions'
       ansible.builtin.debug:
-        var: __spoke_bgp_state.resources
-      when: __spoke_bgp_state is defined
+        msg: "{{ __spoke_bgp_summary.stdout_lines }}"
+      when: __spoke_bgp_summary is succeeded
 
   tags: ['spoke']

@@ -1,12 +1,12 @@
 ---
-# Lab 01 Verification: Deploy test pods and check cross-cluster connectivity.
+# Lab 01 Verification: Control-plane checks and cross-cluster ping.
 #
 # Prerequisites:
-#   ap common/setup.yaml
-#   ap lab01-cudn-bgp/lab01.yaml
+#   ansible-playbook common/setup.yaml
+#   ansible-playbook lab01-cudn-bgp/lab01.yaml
 #
 # Run it with:
-#   ap lab01-cudn-bgp/verify.yaml
+#   ansible-playbook lab01-cudn-bgp/verify.yaml
 
 - name: 'Verify c8000v BGP state'
   hosts: c8000v
@@ -48,7 +48,113 @@
 
   tags: ['c8000v']
 
-- name: 'Verify clusters and test connectivity'
+- name: 'Verify hub BGP sessions'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Get hub FRR pods'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __hub_frr_pods
+
+    - name: 'Show hub BGP summary from FRR'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ item.metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp summary'"
+      loop: "{{ __hub_frr_pods.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      register: __hub_bgp_summaries
+
+    - name: 'Hub BGP sessions'
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ __hub_bgp_summaries.results }}"
+      loop_control:
+        label: "{{ item.item.metadata.name }}"
+
+    - name: 'Show hub FRR BGP routes'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ __hub_frr_pods.resources[0].metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp ipv4 unicast'"
+      register: __hub_frr_routes
+
+    - name: 'Hub FRR BGP routes (expect spoke 10.200.x.x prefixes)'
+      ansible.builtin.debug:
+        msg: "{{ __hub_frr_routes.stdout_lines }}"
+
+  tags: ['hub']
+
+- name: 'Verify spoke BGP sessions'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Get spoke FRR pods'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-frr-k8s
+        label_selectors:
+          - "app=frr-k8s"
+      register: __spoke_frr_pods
+
+    - name: 'Show spoke BGP summary from FRR'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ item.metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp summary'"
+      loop: "{{ __spoke_frr_pods.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      register: __spoke_bgp_summaries
+
+    - name: 'Spoke BGP sessions'
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ __spoke_bgp_summaries.results }}"
+      loop_control:
+        label: "{{ item.item.metadata.name }}"
+
+    - name: 'Show spoke FRR BGP routes'
+      kubernetes.core.k8s_exec:
+        namespace: openshift-frr-k8s
+        pod: "{{ __spoke_frr_pods.resources[0].metadata.name }}"
+        container: frr
+        command: "vtysh -c 'show bgp ipv4 unicast'"
+      register: __spoke_frr_routes
+
+    - name: 'Spoke FRR BGP routes (expect hub 10.100.x.x prefixes)'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_frr_routes.stdout_lines }}"
+
+  tags: ['spoke']
+
+- name: 'Deploy test pods and verify connectivity'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -57,22 +163,7 @@
     - ../common/manifest/vars.yaml
 
   tasks:
-    # --- Hub verification ---
-    - name: 'Check hub BGP session states'
-      kubernetes.core.k8s_info:
-        api_version: frrk8s.metallb.io/v1beta1
-        kind: FRRNodeState
-        namespace: openshift-frr-k8s
-      environment:
-        KUBECONFIG: "{{ hub_kubeconfig }}"
-      register: __hub_sessions
-      tags: ['hub']
-
-    - name: 'Display hub BGP session states'
-      ansible.builtin.debug:
-        var: __hub_sessions.resources
-      tags: ['hub']
-
+    # --- Hub test pod ---
     - name: 'Label hub namespace for privileged pod security'
       kubernetes.core.k8s:
         state: patched
@@ -136,22 +227,7 @@
         msg: "Hub test pod CUDN IP: {{ hub_pod_ip }}"
       tags: ['hub']
 
-    # --- Spoke verification ---
-    - name: 'Check spoke BGP session states'
-      kubernetes.core.k8s_info:
-        api_version: frrk8s.metallb.io/v1beta1
-        kind: FRRNodeState
-        namespace: openshift-frr-k8s
-      environment:
-        KUBECONFIG: "{{ spoke_kubeconfig }}"
-      register: __spoke_sessions
-      tags: ['spoke']
-
-    - name: 'Display spoke BGP session states'
-      ansible.builtin.debug:
-        var: __spoke_sessions.resources
-      tags: ['spoke']
-
+    # --- Spoke test pod ---
     - name: 'Label spoke namespace for privileged pod security'
       kubernetes.core.k8s:
         state: patched
@@ -215,62 +291,44 @@
         msg: "Spoke test pod CUDN IP: {{ spoke_pod_ip }}"
       tags: ['spoke']
 
-    # --- Cross-cluster iperf3 tests ---
-    - name: 'Start iperf3 server on spoke pod'
-      kubernetes.core.k8s_exec:
-        namespace: cudn-spoke-ns
-        pod: spoke-test
-        command: "sh -c 'iperf3 -s -1 -D && echo iperf3 server started on port 5201'"
-      environment:
-        KUBECONFIG: "{{ spoke_kubeconfig }}"
-      tags: ['iperf3']
-
-    - name: 'iperf3 hub -> spoke (10s throughput test)'
+    # --- Cross-cluster ping tests ---
+    - name: 'Ping hub -> spoke'
       kubernetes.core.k8s_exec:
         namespace: cudn-hub-ns
         pod: hub-test
-        command: "iperf3 -c {{ spoke_pod_ip }} -t 10"
+        command: "ping -c 5 -W 2 {{ spoke_pod_ip }}"
       environment:
         KUBECONFIG: "{{ hub_kubeconfig }}"
-      register: __hub_to_spoke_iperf3
+      register: __hub_to_spoke_ping
       ignore_errors: true
-      tags: ['iperf3']
+      tags: ['ping']
 
-    - name: 'Display hub -> spoke iperf3 result'
+    - name: 'Display hub -> spoke ping result'
       ansible.builtin.debug:
-        msg: "{{ __hub_to_spoke_iperf3.stdout_lines | default(__hub_to_spoke_iperf3.stderr_lines) }}"
-      tags: ['iperf3']
+        msg: "{{ __hub_to_spoke_ping.stdout_lines | default(__hub_to_spoke_ping.stderr_lines) }}"
+      tags: ['ping']
 
-    - name: 'Start iperf3 server on hub pod'
-      kubernetes.core.k8s_exec:
-        namespace: cudn-hub-ns
-        pod: hub-test
-        command: "sh -c 'iperf3 -s -1 -D && echo iperf3 server started on port 5201'"
-      environment:
-        KUBECONFIG: "{{ hub_kubeconfig }}"
-      tags: ['iperf3']
-
-    - name: 'iperf3 spoke -> hub (10s throughput test)'
+    - name: 'Ping spoke -> hub'
       kubernetes.core.k8s_exec:
         namespace: cudn-spoke-ns
         pod: spoke-test
-        command: "iperf3 -c {{ hub_pod_ip }} -t 10"
+        command: "ping -c 5 -W 2 {{ hub_pod_ip }}"
       environment:
         KUBECONFIG: "{{ spoke_kubeconfig }}"
-      register: __spoke_to_hub_iperf3
+      register: __spoke_to_hub_ping
       ignore_errors: true
-      tags: ['iperf3']
+      tags: ['ping']
 
-    - name: 'Display spoke -> hub iperf3 result'
+    - name: 'Display spoke -> hub ping result'
       ansible.builtin.debug:
-        msg: "{{ __spoke_to_hub_iperf3.stdout_lines | default(__spoke_to_hub_iperf3.stderr_lines) }}"
-      tags: ['iperf3']
+        msg: "{{ __spoke_to_hub_ping.stdout_lines | default(__spoke_to_hub_ping.stderr_lines) }}"
+      tags: ['ping']
 
     - name: 'Summary'
       ansible.builtin.debug:
         msg:
         - "Hub test pod CUDN IP: {{ hub_pod_ip }}"
         - "Spoke test pod CUDN IP: {{ spoke_pod_ip }}"
-        - "Hub -> Spoke iperf3: {{ 'SUCCESS' if __hub_to_spoke_iperf3 is succeeded else 'FAILED' }}"
-        - "Spoke -> Hub iperf3: {{ 'SUCCESS' if __spoke_to_hub_iperf3 is succeeded else 'FAILED' }}"
-      tags: ['iperf3']
+        - "Hub -> Spoke ping: {{ 'PASS' if __hub_to_spoke_ping is succeeded else 'FAIL' }}"
+        - "Spoke -> Hub ping: {{ 'PASS' if __spoke_to_hub_ping is succeeded else 'FAIL' }}"
+      tags: ['ping']

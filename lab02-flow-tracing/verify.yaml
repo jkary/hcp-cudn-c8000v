@@ -155,17 +155,70 @@
       ansible.builtin.debug:
         msg: "{{ __spoke_capture.stdout_lines | default(['No capture data']) }}"
 
-    # --- Summary ---
-    - name: 'Lab 02 traffic summary'
-      vars:
-        hub_iperf: "{{ 'PASS' if (__hub_iperf3.stdout | default('')) is search('receiver') else 'FAIL' }}"
-        hub_tcpd: "{{ 'PASS' if (__hub_capture.stdout_lines | default([]) | length) > 1 else 'FAIL' }}"
-        spoke_iperf: "{{ 'PASS' if (__spoke_iperf3.stdout | default('')) is search('receiver') else 'FAIL' }}"
-        spoke_tcpd: "{{ 'PASS' if (__spoke_capture.stdout_lines | default([]) | length) > 1 else 'FAIL' }}"
+    # --- Diagnostics (run when iperf3 fails) ---
+    - name: 'Check hub -> spoke CUDN ping'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "ping -c 3 -W 2 {{ spoke_test_ip }}"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_ping
+      ignore_errors: true
+      when: (__hub_iperf3.stdout | default('')) is not search('receiver')
+
+    - name: 'Check spoke -> hub CUDN ping'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: "ping -c 3 -W 2 {{ hub_test_ip }}"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_ping
+      ignore_errors: true
+      when: (__spoke_iperf3.stdout | default('')) is not search('receiver')
+
+    - name: 'Hub pod routing table'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: hub-test
+        command: "ip route show"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_routes
+      ignore_errors: true
+      when: (__hub_iperf3.stdout | default('')) is not search('receiver')
+
+    - name: 'Spoke pod routing table'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        command: "ip route show"
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __spoke_routes
+      ignore_errors: true
+      when: (__spoke_iperf3.stdout | default('')) is not search('receiver')
+
+    - name: 'Diagnostics - hub -> spoke ping'
       ansible.builtin.debug:
-        msg:
-          - "Hub->Spoke iperf3: {{ hub_iperf }}  |  tcpdump: {{ hub_tcpd }}"
-          - "Spoke->Hub iperf3: {{ spoke_iperf }}  |  tcpdump: {{ spoke_tcpd }}"
+        msg: "{{ __hub_ping.stdout_lines | default(['No ping data']) }}"
+      when: __hub_ping is not skipped
+
+    - name: 'Diagnostics - spoke -> hub ping'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_ping.stdout_lines | default(['No ping data']) }}"
+      when: __spoke_ping is not skipped
+
+    - name: 'Diagnostics - hub pod routes'
+      ansible.builtin.debug:
+        msg: "{{ __hub_routes.stdout_lines | default(['No route data']) }}"
+      when: __hub_routes is not skipped
+
+    - name: 'Diagnostics - spoke pod routes'
+      ansible.builtin.debug:
+        msg: "{{ __spoke_routes.stdout_lines | default(['No route data']) }}"
+      when: __spoke_routes is not skipped
 
   tags: ['trace']
 
@@ -222,72 +275,23 @@
 
   tags: ['c8000v']
 
-- name: 'Hub FRR - show spoke routes (10.200.x.x)'
+- name: 'Lab 02 verification summary'
   hosts: localhost
   connection: local
   gather_facts: false
 
-  vars_files:
-    - ../common/manifest/vars.yaml
-
-  environment:
-    KUBECONFIG: "{{ hub_kubeconfig }}"
-
   tasks:
-    - name: 'Get a hub FRR pod'
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Pod
-        namespace: openshift-frr-k8s
-        label_selectors:
-          - "app=frr-k8s"
-      register: __hub_frr_pods
-
-    - name: 'Show BGP routes on hub FRR pod'
-      kubernetes.core.k8s_exec:
-        namespace: openshift-frr-k8s
-        pod: "{{ __hub_frr_pods.resources[0].metadata.name }}"
-        container: frr
-        command: "vtysh -c 'show bgp ipv4 unicast'"
-      register: __hub_frr_routes
-
-    - name: 'Hub FRR BGP routes (expect spoke 10.200.x.x prefixes)'
+    - name: 'Lab 02 traffic summary'
+      vars:
+        hub_iperf: "{{ 'PASS' if (__hub_iperf3.stdout | default('')) is search('receiver') else 'FAIL' }}"
+        hub_tcpd: "{{ 'PASS' if (__hub_capture.stdout_lines | default([]) | length) > 1 else 'FAIL' }}"
+        spoke_iperf: "{{ 'PASS' if (__spoke_iperf3.stdout | default('')) is search('receiver') else 'FAIL' }}"
+        spoke_tcpd: "{{ 'PASS' if (__spoke_capture.stdout_lines | default([]) | length) > 1 else 'FAIL' }}"
       ansible.builtin.debug:
-        msg: "{{ __hub_frr_routes.stdout_lines }}"
-
-  tags: ['frr']
-
-- name: 'Spoke FRR - show hub routes (10.100.x.x)'
-  hosts: localhost
-  connection: local
-  gather_facts: false
-
-  vars_files:
-    - ../common/manifest/vars.yaml
-
-  environment:
-    KUBECONFIG: "{{ spoke_kubeconfig }}"
-
-  tasks:
-    - name: 'Get a spoke FRR pod'
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Pod
-        namespace: openshift-frr-k8s
-        label_selectors:
-          - "app=frr-k8s"
-      register: __spoke_frr_pods
-
-    - name: 'Show BGP routes on spoke FRR pod'
-      kubernetes.core.k8s_exec:
-        namespace: openshift-frr-k8s
-        pod: "{{ __spoke_frr_pods.resources[0].metadata.name }}"
-        container: frr
-        command: "vtysh -c 'show bgp ipv4 unicast'"
-      register: __spoke_frr_routes
-
-    - name: 'Spoke FRR BGP routes (expect hub 10.100.x.x prefixes)'
-      ansible.builtin.debug:
-        msg: "{{ __spoke_frr_routes.stdout_lines }}"
-
-  tags: ['frr']
+        msg:
+          - "==============================="
+          - "  Lab 02 Verification Results"
+          - "==============================="
+          - "Hub->Spoke iperf3: {{ hub_iperf }}  |  tcpdump: {{ hub_tcpd }}"
+          - "Spoke->Hub iperf3: {{ spoke_iperf }}  |  tcpdump: {{ spoke_tcpd }}"
+          - "==============================="
