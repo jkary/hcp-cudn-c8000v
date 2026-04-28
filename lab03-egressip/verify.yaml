@@ -322,8 +322,8 @@
 
   tags: ['phase3']
 
-# === Phase 4: Dual-spine ECMP verification ===
-- name: 'Phase 4: Verify dual-spine ECMP on c8000v-1'
+# === Phase 4: c8000v and FRR route verification ===
+- name: 'Phase 4: Verify c8000v BGP routes'
   hosts: c8000v
   gather_facts: false
   connection: ansible.netcommon.network_cli
@@ -340,79 +340,27 @@
     ansible_paramiko_look_for_keys: false
 
   tasks:
-    - name: 'Show c8000v-1 iBGP neighbor status'
+    - name: 'Show c8000v BGP summary'
       ansible.netcommon.cli_command:
         command: 'show ip bgp summary'
-      register: __bgp_summary_1
+      register: __bgp_summary
 
-    - name: 'Display c8000v-1 BGP summary (should show iBGP peer {{ c8000v_2_host }})'
+    - name: 'Display c8000v BGP summary'
       ansible.builtin.debug:
-        var: __bgp_summary_1.stdout_lines
+        var: __bgp_summary.stdout_lines
 
-    - name: 'Show c8000v-1 routes to spoke CUDN'
+    - name: 'Show c8000v BGP routes'
       ansible.netcommon.cli_command:
-        command: 'show ip route 10.200.0.0 255.255.0.0'
-      register: __spoke_routes_1
+        command: 'show ip bgp'
+      register: __bgp_routes
 
-    - name: 'Display c8000v-1 spoke CUDN routes'
+    - name: 'Display c8000v BGP routes'
       ansible.builtin.debug:
-        msg:
-          - "c8000v-1 routes to spoke CUDN (should show direct eBGP path):"
-          - "{{ __spoke_routes_1.stdout_lines }}"
+        var: __bgp_routes.stdout_lines
 
   tags: ['phase4']
 
-- name: 'Phase 4b: Verify dual-spine ECMP on c8000v-2'
-  hosts: c8000v-2
-  gather_facts: false
-  connection: ansible.netcommon.network_cli
-
-  vars_files:
-    - ../common/manifest/vars.yaml
-
-  vars:
-    ansible_network_os: cisco.ios.ios
-    ansible_host: "{{ c8000v_2_host }}"
-    ansible_user: "{{ c8000v_2_user }}"
-    ansible_password: "{{ c8000v_2_password | default(omit) }}"
-    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
-    ansible_paramiko_look_for_keys: false
-
-  tasks:
-    - name: 'Show c8000v-2 BGP summary'
-      ansible.netcommon.cli_command:
-        command: 'show ip bgp summary'
-      register: __bgp_summary_2
-
-    - name: 'Display c8000v-2 BGP summary (should show iBGP + eBGP peers)'
-      ansible.builtin.debug:
-        var: __bgp_summary_2.stdout_lines
-
-    - name: 'Show c8000v-2 routes to hub CUDN'
-      ansible.netcommon.cli_command:
-        command: 'show ip route 10.100.0.0 255.255.0.0'
-      register: __hub_routes_2
-
-    - name: 'Display c8000v-2 hub CUDN routes'
-      ansible.builtin.debug:
-        msg:
-          - "c8000v-2 routes to hub CUDN (should show eBGP paths via 172.16.253.61-63):"
-          - "{{ __hub_routes_2.stdout_lines }}"
-
-    - name: 'Show c8000v-2 routes to spoke CUDN'
-      ansible.netcommon.cli_command:
-        command: 'show ip route 10.200.0.0 255.255.0.0'
-      register: __spoke_routes_2
-
-    - name: 'Display c8000v-2 spoke CUDN routes'
-      ansible.builtin.debug:
-        msg:
-          - "c8000v-2 routes to spoke CUDN (should show eBGP via 172.16.253.64 + iBGP):"
-          - "{{ __spoke_routes_2.stdout_lines }}"
-
-  tags: ['phase4']
-
-- name: 'Phase 4c: Verify dual-path from FRR pods'
+- name: 'Phase 4b: Verify FRR routes on hub'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -424,7 +372,7 @@
     KUBECONFIG: "{{ hub_kubeconfig }}"
 
   tasks:
-    - name: 'Get FRR pod name on hub'
+    - name: 'Get a hub FRR pod'
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Pod
@@ -433,29 +381,17 @@
           - "app=frr-k8s"
       register: __frr_pods
 
-    - name: 'Show BGP neighbors from hub FRR pod'
+    - name: 'Show BGP routes from hub FRR pod'
       kubernetes.core.k8s_exec:
         namespace: openshift-frr-k8s
         pod: "{{ __frr_pods.resources[0].metadata.name }}"
         container: frr
-        command: "vtysh -c 'show ip bgp summary'"
-      register: __frr_bgp_summary
-
-    - name: 'Display FRR BGP neighbors (should show 2 peers: 172.16.252.50 and 172.16.253.50)'
-      ansible.builtin.debug:
-        var: __frr_bgp_summary.stdout_lines
-
-    - name: 'Show BGP routes for spoke CUDN from hub FRR'
-      kubernetes.core.k8s_exec:
-        namespace: openshift-frr-k8s
-        pod: "{{ __frr_pods.resources[0].metadata.name }}"
-        container: frr
-        command: "vtysh -c 'show ip bgp 10.200.0.0/16'"
+        command: "vtysh -c 'show bgp ipv4 unicast'"
       register: __frr_bgp_routes
 
-    - name: 'Display FRR routes to spoke CUDN (should show 2 equal-cost paths)'
+    - name: 'Hub FRR BGP routes (expect spoke 10.200.x.x prefixes)'
       ansible.builtin.debug:
-        var: __frr_bgp_routes.stdout_lines
+        msg: "{{ __frr_bgp_routes.stdout_lines }}"
 
   tags: ['phase4']
 

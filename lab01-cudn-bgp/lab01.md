@@ -4,47 +4,32 @@ This guide sets up cross-cluster pod networking between a hub (management) and s
 
 ## Network Design
 
-All nodes are dual-homed to both c8000v spines. The two routers share AS 64514 and peer via iBGP, providing ECMP for cross-cluster traffic.
+Hub and spoke clusters connect through a single c8000v router with two interfaces — one on each cluster's network.
 
 ```
-                              Spines (AS 64514)
-      +-------------------+        iBGP        +-------------------+
-      |     c8000v-1      |<------------------>|     c8000v-2      |
-      |  172.16.252.50    |                    |  172.16.253.50    |
-      +--+----+----+---+-+                     +-------------------+
-       /   \     \     \                        /  /    /  \
-      /    -+-----+--- -+--------------------- /  /    /    \
-     /    /  \     \     \                       /    /      \
-    /    /    \     \   --+----------------------    /        \
-    |    |     \     \  |  \                        |          \
-    |    |      \     --+--+----------------------  |           --------
-    |    |       ----   |     \                  |  |                  |
-    |    |          |   |      ------------------+--+---------------   |
-    |    |          |   |                        |  |              |   |
-   +------+        +------+                       +------+        +------+
-   |  M1  |        |  M2  |                       |  M3  |        |  W1  |
-   |  .61 |        |  .62 |                       |  .63 |        |  .64 |
-   +------+        +------+                       +------+        +------+
-                              Leaves
+  Hub Cluster (AS 64512)              c8000v (AS 64514)              Spoke (AS 64513)
+  CUDN: 10.100.0.0/16                                               CUDN: 10.200.0.0/16
 
-  Hub Cluster (AS 64512)                Spoke (AS 64513)
-  CUDN: 10.100.0.0/16                  CUDN: 10.200.0.0/16
-
-  lab-network:     172.16.252.0/24 (c8000v-1 <-> leaves)
-  lab-network-253: 172.16.253.0/24 (c8000v-2 <-> leaves)
+  +------+  +------+  +------+     +-------------------+            +------+
+  |  M1  |  |  M2  |  |  M3  |     |     c8000v        |            |  W1  |
+  |  .61 |  |  .62 |  |  .63 |     | Gi1: 172.16.252.50|            |  .64 |
+  +--+---+  +--+---+  +--+---+     | Gi2: 172.16.253.50|            +--+---+
+     |         |         |          +--+-------------+--+               |
+     |         |         |             |             |                  |
+  ---+---------+---------+-------------+---       ---+------------------+---
+       lab-network (172.16.252.0/24)                lab-network-253 (172.16.253.0/24)
 ```
 
 | Component | ASN | CUDN CIDR | Node IPs |
 |-----------|-----|-----------|----------|
-| Hub cluster | 64512 | 10.100.0.0/16 (/24 per node) | 172.16.252.61-63, 172.16.253.61-63 |
-| Spoke cluster | 64513 | 10.200.0.0/16 (/24 per node) | 172.16.252.64, 172.16.253.64 |
-| c8000v-1 | 64514 | N/A | 172.16.252.50 |
-| c8000v-2 | 64514 | N/A | 172.16.253.50, iBGP peer 172.16.252.51 |
+| Hub cluster | 64512 | 10.100.0.0/16 (/24 per node) | 172.16.252.61-63 |
+| Spoke cluster | 64513 | 10.200.0.0/16 (/24 per node) | 172.16.253.64 |
+| c8000v | 64514 | N/A | Gi1: 172.16.252.50, Gi2: 172.16.253.50 |
 
 ## Prerequisites
 
 - Hub and spoke clusters deployed (OCP 4.20+)
-- `ansible-playbook common/setup.yaml` completed (creates c8000v VMs and configures FRR)
+- `ansible-playbook common/setup.yaml` completed (creates c8000v VM and configures FRR)
 
 ## Step-by-Step Reproduction
 
@@ -65,28 +50,26 @@ configure terminal
 router bgp 64514
  bgp router-id 172.16.252.50
  bgp log-neighbor-changes
- ! Hub cluster nodes (AS 64512)
+ ! Hub cluster nodes (AS 64512) on Gi1
  neighbor 172.16.252.61 remote-as 64512
  neighbor 172.16.252.61 description hub-master-0
+ neighbor 172.16.252.61 next-hop-self
  neighbor 172.16.252.62 remote-as 64512
  neighbor 172.16.252.62 description hub-master-1
+ neighbor 172.16.252.62 next-hop-self
  neighbor 172.16.252.63 remote-as 64512
  neighbor 172.16.252.63 description hub-master-2
- ! Spoke cluster node (AS 64513)
- neighbor 172.16.252.64 remote-as 64513
- neighbor 172.16.252.64 description spoke-worker-1
- ! iBGP peer (dual-spine)
- neighbor 172.16.252.51 remote-as 64514
- neighbor 172.16.252.51 description c8000v-2
- neighbor 172.16.252.51 next-hop-self
+ neighbor 172.16.252.63 next-hop-self
+ ! Spoke cluster node (AS 64513) on Gi2
+ neighbor 172.16.253.64 remote-as 64513
+ neighbor 172.16.253.64 description spoke-worker-1
+ neighbor 172.16.253.64 next-hop-self
  !
  address-family ipv4 unicast
   neighbor 172.16.252.61 activate
   neighbor 172.16.252.62 activate
   neighbor 172.16.252.63 activate
-  neighbor 172.16.252.64 activate
-  neighbor 172.16.252.51 activate
-  maximum-paths ibgp 2
+  neighbor 172.16.253.64 activate
   maximum-paths 3
  exit-address-family
 end
@@ -94,41 +77,32 @@ end
 write memory
 ```
 
-**c8000v-2** (172.16.253.50) has a mirrored configuration on the `lab-network-253` subnet, with its iBGP peer pointing back to c8000v-1 at 172.16.252.50.
-
-Verify on either router:
+Verify:
 
 ```
 show ip bgp summary
 ```
 
-All neighbors will show `Idle` until the clusters have FRR-K8s configured. The iBGP peer should come up once both routers are configured.
+All neighbors will show `Idle` until the clusters have FRR-K8s configured.
 
-### Phase 2: Install NMState and Configure Second NICs
+### Phase 2: Install NMState and Configure Spoke Second NIC
 
-The dual-spine topology requires each node to have an IP on the `lab-network-253` (172.16.253.0/24) subnet. The lab playbook installs NMState on both clusters and applies NNCPs to configure the second NIC. To do this manually:
+The spoke worker needs a second NIC on `lab-network-253` (172.16.253.0/24) to peer with c8000v's Gi2. The lab playbook installs NMState on the spoke and applies an NNCP. To do this manually:
 
 ```bash
-# Hub cluster
-export KUBECONFIG=/home/jkary/labs/hcp/deploy/auth/kubeconfig
-oc apply -f common/manifest/nmstate-operator.yaml
-oc apply -f common/manifest/nmstate-instance.yaml
-oc apply -f lab01-cudn-bgp/manifest/nncp-spine2.yaml
-
-# Spoke cluster
 export KUBECONFIG=/home/jkary/labs/hcp/spoke/auth/kubeconfig
 oc apply -f common/manifest/nmstate-operator.yaml
 oc apply -f common/manifest/nmstate-instance.yaml
 oc apply -f lab01-cudn-bgp/manifest/spoke-nncp-spine2.yaml
 ```
 
-Verify NNCPs are applied:
+Verify the NNCP is applied:
 
 ```bash
 oc get nncp
 ```
 
-All policies should show `Available`.
+The policy should show `Available`.
 
 ### Phase 3: Hub Cluster - Enable FRR and Route Advertisements
 
@@ -251,36 +225,13 @@ oc get routeadvertisements spoke-cudn-routes -o jsonpath='{.status}'
 #### Check c8000v BGP routes
 
 ```
-show ip bgp summary    # 5 neighbors: 3 hub, 1 spoke, 1 iBGP peer — all Established
-show ip bgp            # should show 10.100.x.0/24 and 10.200.0.0/24 with multipath and iBGP entries
+show ip bgp summary    # 4 neighbors: 3 hub (252), 1 spoke (253) — all Established
+show ip bgp            # should show 10.100.x.0/24 and 10.200.0.0/24 prefixes
 ```
 
-Expected output (from c8000v-1, showing multipath and iBGP entries):
-
-```
-     Network          Next Hop            Metric LocPrf Weight Path
- *m   10.100.0.0/24    172.16.252.62            0             0 64512 i
- *>                    172.16.252.61            0             0 64512 i
- * i                   172.16.252.51            0    100      0 64512 i
- *m   10.100.0.0/16    172.16.252.62            0             0 64512 i
- *>                    172.16.252.61            0             0 64512 i
- *m                    172.16.252.63            0             0 64512 i
- * i                   172.16.252.51            0    100      0 64512 i
- *m   10.100.1.0/24    172.16.252.61            0             0 64512 i
- * i                   172.16.252.51            0    100      0 64512 i
- *>                    172.16.252.63            0             0 64512 i
- *m   10.100.2.0/24    172.16.252.62            0             0 64512 i
- * i                   172.16.252.51            0    100      0 64512 i
- *>                    172.16.252.63            0             0 64512 i
- * i  10.200.0.0/24    172.16.252.51            0    100      0 64513 i
- *>                    172.16.252.64            0             0 64513 i
- *>   10.200.0.0/16    172.16.252.64            0             0 64513 i
- * i                   172.16.252.51            0    100      0 64513 i
-```
-
-- `*>` = best path, `*m` = multipath (ECMP), `* i` = iBGP-learned via c8000v-2
 - The /24 subnets are per-node allocations advertised by RouteAdvertisements
 - The /16 aggregates come from the FRRConfiguration `prefixes` field
+- Hub routes show next-hops on 172.16.252.x, spoke routes on 172.16.253.x
 
 #### Deploy test pods
 
@@ -393,7 +344,6 @@ The pod's default route goes through the CUDN interface, so cross-cluster traffi
 | `lab01-cudn-bgp/manifest/hub-bgp.yaml` | Hub FRRConfiguration + RouteAdvertisements |
 | `lab01-cudn-bgp/manifest/spoke-cudn.yaml` | Spoke namespace + ClusterUserDefinedNetwork |
 | `lab01-cudn-bgp/manifest/spoke-bgp.yaml` | Spoke FRRConfiguration + RouteAdvertisements |
-| `lab01-cudn-bgp/manifest/nncp-spine2.yaml` | NNCPs for hub nodes on lab-network-253 |
 | `lab01-cudn-bgp/manifest/spoke-nncp-spine2.yaml` | NNCP for spoke worker on lab-network-253 |
 | `common/manifest/nmstate-operator.yaml` | NMState operator Subscription + OperatorGroup |
 | `common/manifest/nmstate-instance.yaml` | NMState CR instance |

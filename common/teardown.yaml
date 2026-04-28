@@ -362,39 +362,7 @@
 
   tags: ['c8000v']
 
-- name: 'Teardown c8000v-2 BGP configuration'
-  hosts: c8000v-2
-  gather_facts: false
-  connection: ansible.netcommon.network_cli
-
-  vars_files:
-    - manifest/vars.yaml
-
-  vars:
-    ansible_network_os: cisco.ios.ios
-    ansible_host: "{{ c8000v_2_host }}"
-    ansible_user: "{{ c8000v_2_user }}"
-    ansible_password: "{{ c8000v_2_password | default(omit) }}"
-    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
-
-  tasks:
-    - name: 'Remove BGP configuration from c8000v-2'
-      ansible.netcommon.cli_config:
-        config: "no router bgp {{ c8000v_asn }}"
-
-    - name: 'Verify BGP is removed on c8000v-2'
-      ansible.netcommon.cli_command:
-        command: 'show ip bgp summary'
-      register: __bgp_summary_2
-      ignore_errors: true
-
-    - name: 'Display c8000v-2 BGP summary'
-      ansible.builtin.debug:
-        var: __bgp_summary_2.stdout_lines
-
-  tags: ['c8000v']
-
-- name: 'Teardown: Remove infrastructure (c8000v-2, second NICs, lab-network-253)'
+- name: 'Teardown: Remove spoke second NIC and lab-network-253'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -403,38 +371,15 @@
     - manifest/vars.yaml
 
   tasks:
-    - name: 'Stop c8000v-2 VM'
-      ansible.builtin.command: sudo virsh destroy c8000v-2
-      ignore_errors: true
-
-    - name: 'Undefine c8000v-2 VM'
-      ansible.builtin.command: sudo virsh undefine c8000v-2
-      ignore_errors: true
-
-    - name: 'Remove c8000v-2 disk'
-      ansible.builtin.file:
-        path: "{{ c8000v_2_disk }}"
-        state: absent
-      become: true
-
-    - name: 'Remove c8000v-2 day0 ISO'
-      ansible.builtin.file:
-        path: "{{ c8000v_2_day0_iso }}"
-        state: absent
-      become: true
-
-    - name: 'Detach lab-network-253 NIC from cluster VMs'
+    - name: 'Detach lab-network-253 NIC from spoke worker'
       ansible.builtin.shell: |
-        if sudo virsh domiflist {{ item.name }} | grep -q lab-network-253; then
-          sudo virsh detach-interface --domain {{ item.name }} \
-            --type network --mac {{ item.mac }} \
+        if sudo virsh domiflist {{ spoke_vm.name }} | grep -q lab-network-253; then
+          sudo virsh detach-interface --domain {{ spoke_vm.name }} \
+            --type network --mac {{ spoke_vm.mac }} \
             --persistent --live
         else
           echo "Not attached"
         fi
-      loop: "{{ cluster_vms_spine2 }}"
-      loop_control:
-        label: "{{ item.name }}"
       ignore_errors: true
 
     - name: 'Destroy lab-network-253'
