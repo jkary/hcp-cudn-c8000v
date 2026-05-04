@@ -66,7 +66,7 @@ The common setup is idempotent — it skips VM creation if VMs already exist and
 
 ## Lab-Specific Notes
 
-**Lab03 (EgressIP)**: Installs NMState on the spoke cluster, applies NNCPs for the spoke's second NIC IP, configures EgressIP resources for pinned egress source IPs.
+**Lab03 (EgressIP)**: Demonstrates EgressIP for stable pod identity. Three verification phases: default egress (node IP as source), EgressIP applied (172.16.252.70 as source), and cross-cluster CUDN identity (pod CUDN IP preserved, EgressIP not applied). Includes tcpdump proof that cross-cluster traffic uses CUDN IPs.
 
 **Lab04 (VRF Lite)**: Replaces the entire c8000v BGP config (not additive). Uses NMState for VLAN sub-interfaces and `nsenter -t 1 -n` from FRR pods to move VLAN interfaces into OVN-created VRF devices. Run `common/teardown.yaml` + `common/setup.yaml` to restore base config after this lab.
 
