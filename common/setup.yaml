@@ -57,7 +57,7 @@
 
   tags: ['infra']
 
-- name: 'Infrastructure: Create c8000v-1 VM'
+- name: 'Infrastructure: Create c8000v VM'
   hosts: localhost
   connection: local
   gather_facts: false

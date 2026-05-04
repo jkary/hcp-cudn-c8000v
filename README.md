@@ -1,6 +1,6 @@
 # BGP-Routed CUDNs Between Hub and Spoke Clusters via c8000v
 
-A series of labs demonstrating cross-cluster pod networking on OpenShift using ClusterUserDefinedNetworks (CUDNs), BGP via FRR-K8s, and Cisco c8000v virtual routers in a dual-spine topology.
+A series of labs demonstrating cross-cluster pod networking on OpenShift (OCP 4.20+) using ClusterUserDefinedNetworks (CUDNs), BGP via FRR-K8s, and a Cisco c8000v virtual router as the BGP relay.
 
 ## Hosted Control Planes
 
@@ -11,34 +11,20 @@ In this lab environment, the **hub cluster** (M1–M3) serves as both control pl
 ## Network Design
 
 ```
-                              Spines (AS 64514)
-      +-------------------+        iBGP        +-------------------+
-      |     c8000v-1      |<------------------>|     c8000v-2      |
-      |  172.16.252.50    |                    |  172.16.253.50    |
-      +--+----+----+---+-+                     +-------------------+
-       /   \     \     \                        /  /    /  \
-      /    -+-----+--- -+--------------------- /  /    /    \
-     /    /  \     \     \                       /    /      \
-    /    /    \     \   --+----------------------    /        \
-    |    |     \     \  |  \                        |          \
-    |    |      \     --+--+----------------------  |           --------
-    |    |       ----   |     \                  |  |                  |
-    |    |          |   |      ------------------+--+---------------   |
-    |    |          |   |                        |  |              |   |
-   +------+        +------+                       +------+        +------+
-   |  M1  |        |  M2  |                       |  M3  |        |  W1  |
-   |  .61 |        |  .62 |                       |  .63 |        |  .64 |
-   +------+        +------+                       +------+        +------+
-                              Leaves
+  Hub Cluster (AS 64512)              c8000v (AS 64514)             Spoke (AS 64513)
+  CUDN: 10.100.0.0/16                                              CUDN: 10.200.0.0/16
 
-  Hub Cluster (AS 64512)                Spoke (AS 64513)
-  CUDN: 10.100.0.0/16                  CUDN: 10.200.0.0/16
-
-  lab-network:     172.16.252.0/24 (c8000v-1 <-> leaves)
-  lab-network-253: 172.16.253.0/24 (c8000v-2 <-> leaves)
+  +------+  +------+  +------+     +-------------------+           +------+
+  |  M1  |  |  M2  |  |  M3  |     |      c8000v       |           |  W1  |
+  |  .61 |  |  .62 |  |  .63 |     | Gi1: 172.16.252.50|           |  .64 |
+  +--+---+  +--+---+  +--+---+     | Gi2: 172.16.253.50|           +--+---+
+     |         |         |          +--+-------------+--+              |
+     |         |         |             |             |                 |
+  ---+---------+---------+-------------+---       ---+-----------------+---
+       lab-network (172.16.252.0/24)                lab-network-253 (172.16.253.0/24)
 ```
 
-Each cluster node is dual-homed to both c8000v routers. The two routers share AS 64514 and peer via iBGP, providing ECMP for cross-cluster traffic.
+The c8000v has two interfaces — one on each cluster's network — and routes CUDN traffic between them. Hub nodes peer with c8000v on Gi1 (172.16.252.50), spoke peers on Gi2 (172.16.253.50).
 
 ## The Stack
 
@@ -48,9 +34,7 @@ Each cluster node is dual-homed to both c8000v routers. The two routers share AS
 | Supernet        | Logical address allocation (/16)                 |
 | Per-node subnet | Physical distribution (/24 per node)             |
 | FRR / BGP       | Advertises reachability across clusters          |
-| iBGP            | Dual-spine route exchange between c8000v routers |
 | VRF             | Isolates networks (multi-tenant)                 |
-| ECMP / LB       | Distributes traffic across multiple paths        |
 
 ## Labs
 
@@ -58,14 +42,14 @@ Each cluster node is dual-homed to both c8000v routers. The two routers share AS
 | ------------------------------------- | ------------------------------------------ | ---------- |
 | [Lab 01](lab01-cudn-bgp/lab01.md)     | CUDN supernets and BGP advertising options | common     |
 | [Lab 02](lab02-flow-tracing/lab02.md) | Flow traceability using tshark             | Lab 01     |
-| [Lab 03](lab03-egressip/lab03.md)     | EgressIP and dual-spine ECMP               | common     |
+| [Lab 03](lab03-egressip/lab03.md)     | EgressIP and pod identity                  | common     |
 | [Lab 04](lab04-vrf-lite/lab04.md)     | VRF lite and multi-tenant isolation        | common     |
 
 ## Prerequisites
 
 - Hub and spoke OpenShift clusters (OCP 4.20+) running as KVM VMs
 - c8000v qcow2 image (set `c8000v_source_qcow2` in `common/manifest/vars.yaml`)
-- Two libvirt management networks connecting leaves to spines. In a production ECMP fabric this would be a single L2 domain, but we use separate networks (`lab-network` for c8000v-1, `lab-network-253` for c8000v-2) to simplify the lab setup ahead of a future EVPN configuration. Set `libvirt_network_name`/`libvirt_network_cidr` and `libvirt_network_253_name`/`libvirt_network_253_cidr` in `common/manifest/vars.yaml`.
+- Two libvirt networks: `lab-network` (172.16.252.0/24) for the hub cluster and c8000v Gi1, `lab-network-253` (172.16.253.0/24) for the spoke cluster and c8000v Gi2
 - Ansible with `ansible.netcommon`, `cisco.ios`, and `kubernetes.core` collections
 - `genisoimage` for day0 ISO creation
 
@@ -75,18 +59,18 @@ Each cluster node is dual-homed to both c8000v routers. The two routers share AS
 # 1. Edit site-specific variables (IPs, ASNs, kubeconfig paths)
 vi common/manifest/vars.yaml
 
-# 2. Run common setup (creates c8000v VMs, attaches second NIC, configures BGP + FRR)
-ap common/setup.yaml
+# 2. Run common setup (creates c8000v VM, attaches second NIC, configures BGP + FRR)
+ansible-playbook common/setup.yaml
 
 # 3. Run a lab
-ap lab01-cudn-bgp/lab01.yaml
-ap lab01-cudn-bgp/verify.yaml
+ansible-playbook lab01-cudn-bgp/lab01.yaml
+ansible-playbook lab01-cudn-bgp/verify.yaml
 
 # Teardown between labs
-ap common/teardown.yaml
+ansible-playbook common/teardown.yaml
 ```
 
-The common setup is idempotent — it skips VM creation if they already exist, and skips NIC attachment if already present.
+The common setup is idempotent — it skips VM creation if VMs already exist, and skips NIC attachment if already present.
 
 ## Customizing for Your Environment
 

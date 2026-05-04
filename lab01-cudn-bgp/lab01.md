@@ -35,9 +35,9 @@ Hub and spoke clusters connect through a single c8000v router with two interface
 
 ### Phase 1: Configure c8000v BGP
 
-Both c8000v routers are configured automatically by `common/setup.yaml` using the Jinja2 template `common/manifest/c8000v-bgp-base.cfg.j2`. To apply manually, SSH to each router:
+The c8000v router is configured automatically by `common/setup.yaml` using the Jinja2 template `common/manifest/c8000v-bgp-base.cfg.j2`. To apply manually, SSH to the router:
 
-**c8000v-1** (172.16.252.50):
+**c8000v** (172.16.252.50):
 
 ```bash
 ssh admin@172.16.252.50
@@ -85,26 +85,7 @@ show ip bgp summary
 
 All neighbors will show `Idle` until the clusters have FRR-K8s configured.
 
-### Phase 2: Install NMState and Configure Spoke Second NIC
-
-The spoke worker needs a second NIC on `lab-network-253` (172.16.253.0/24) to peer with c8000v's Gi2. The lab playbook installs NMState on the spoke and applies an NNCP. To do this manually:
-
-```bash
-export KUBECONFIG=/home/jkary/labs/hcp/spoke/auth/kubeconfig
-oc apply -f common/manifest/nmstate-operator.yaml
-oc apply -f common/manifest/nmstate-instance.yaml
-oc apply -f lab01-cudn-bgp/manifest/spoke-nncp-spine2.yaml
-```
-
-Verify the NNCP is applied:
-
-```bash
-oc get nncp
-```
-
-The policy should show `Available`.
-
-### Phase 3: Hub Cluster - Enable FRR and Route Advertisements
+### Phase 2: Hub Cluster - Enable FRR and Route Advertisements
 
 Set KUBECONFIG to the hub cluster:
 
@@ -112,7 +93,7 @@ Set KUBECONFIG to the hub cluster:
 export KUBECONFIG=/home/jkary/labs/hcp/deploy/auth/kubeconfig
 ```
 
-#### 2a. Patch the Network operator
+#### Patch the Network operator
 
 This does two things:
 - Enables FRR-K8s (deploys FRR pods on every node)
@@ -145,7 +126,7 @@ Wait for the RouteAdvertisements CRD to appear:
 oc get crd routeadvertisements.k8s.ovn.org
 ```
 
-#### 2b. Create CUDN namespace and network
+#### Create CUDN namespace and network
 
 ```bash
 oc apply -f lab01-cudn-bgp/manifest/hub-cudn.yaml
@@ -155,14 +136,14 @@ This creates:
 - Namespace `cudn-hub-ns` with label `k8s.ovn.org/primary-user-defined-network: ""`
 - ClusterUserDefinedNetwork `hub-network` (Layer3, 10.100.0.0/16, /24 per node, Primary role)
 
-#### 2c. Create FRRConfiguration and RouteAdvertisements
+#### Create FRRConfiguration and RouteAdvertisements
 
 ```bash
 oc apply -f lab01-cudn-bgp/manifest/hub-bgp.yaml
 ```
 
 This creates:
-- **FRRConfiguration** `hub-bgp` in `openshift-frr-k8s` namespace — establishes eBGP sessions from AS 64512 to both c8000v spines (AS 64514), advertises 10.100.0.0/16 prefix
+- **FRRConfiguration** `hub-bgp` in `openshift-frr-k8s` namespace — establishes eBGP sessions from AS 64512 to c8000v (AS 64514), advertises 10.100.0.0/16 prefix
 - **RouteAdvertisements** `hub-cudn-routes` — tells OVN to integrate FRR-learned routes into the CUDN data plane, selecting CUDNs with label `advertise: "true"`
 
 Verify BGP sessions:
@@ -173,7 +154,7 @@ oc get bgpsessionstates -n openshift-frr-k8s
 
 All nodes should show `Established`.
 
-### Phase 4: Spoke Cluster - Enable FRR and Route Advertisements
+### Phase 3: Spoke Cluster - Enable FRR and Route Advertisements
 
 Set KUBECONFIG to the spoke cluster:
 
@@ -181,7 +162,7 @@ Set KUBECONFIG to the spoke cluster:
 export KUBECONFIG=/home/jkary/labs/hcp/spoke/auth/kubeconfig
 ```
 
-#### 3a. Patch the spoke Network operator
+#### Patch the spoke Network operator
 
 ```bash
 oc patch Network.operator.openshift.io cluster --type=merge --patch '{
@@ -206,7 +187,7 @@ Wait for FRR-K8s pods and RouteAdvertisements CRD as above.
 > in its networking spec. Monitor the spoke's Network operator to confirm the
 > patch persists.
 
-#### 3b. Create CUDN namespace, network, and BGP peering
+#### Create CUDN namespace, network, and BGP peering
 
 ```bash
 oc apply -f lab01-cudn-bgp/manifest/spoke-cudn.yaml
@@ -220,7 +201,7 @@ oc get bgpsessionstates -n openshift-frr-k8s
 oc get routeadvertisements spoke-cudn-routes -o jsonpath='{.status}'
 ```
 
-### Phase 5: Verification
+### Phase 4: Verification
 
 #### Check c8000v BGP routes
 
@@ -344,9 +325,6 @@ The pod's default route goes through the CUDN interface, so cross-cluster traffi
 | `lab01-cudn-bgp/manifest/hub-bgp.yaml` | Hub FRRConfiguration + RouteAdvertisements |
 | `lab01-cudn-bgp/manifest/spoke-cudn.yaml` | Spoke namespace + ClusterUserDefinedNetwork |
 | `lab01-cudn-bgp/manifest/spoke-bgp.yaml` | Spoke FRRConfiguration + RouteAdvertisements |
-| `lab01-cudn-bgp/manifest/spoke-nncp-spine2.yaml` | NNCP for spoke worker on lab-network-253 |
-| `common/manifest/nmstate-operator.yaml` | NMState operator Subscription + OperatorGroup |
-| `common/manifest/nmstate-instance.yaml` | NMState CR instance |
 | `lab01-cudn-bgp/manifest/test-pods.yaml` | Test pods for verification |
 
 ## Automated Deployment
@@ -365,7 +343,6 @@ ansible-playbook lab01-cudn-bgp/lab01.yaml
 ansible-playbook lab01-cudn-bgp/verify.yaml
 
 # Individual phases
-ansible-playbook lab01-cudn-bgp/lab01.yaml -t nmstate   # NMState + NNCPs only
 ansible-playbook lab01-cudn-bgp/lab01.yaml -t hub       # Hub CUDN + BGP only
 ansible-playbook lab01-cudn-bgp/lab01.yaml -t spoke     # Spoke CUDN + BGP only
 ```

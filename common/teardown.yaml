@@ -6,13 +6,13 @@
 # clean up stale VRF devices and ip rules left behind by OVN.
 #
 # Run it with:
-#   ap common/teardown.yaml
+#   ansible-playbook common/teardown.yaml
 #
 # Individual phases:
-#   ap common/teardown.yaml -t hub
-#   ap common/teardown.yaml -t spoke
-#   ap common/teardown.yaml -t c8000v
-#   ap common/teardown.yaml -t infra   # Remove c8000v-2 VM, second NICs, lab-network-253
+#   ansible-playbook common/teardown.yaml -t hub
+#   ansible-playbook common/teardown.yaml -t spoke
+#   ansible-playbook common/teardown.yaml -t c8000v
+#   ansible-playbook common/teardown.yaml -t infra   # Remove c8000v VM, second NICs, lab-network-253
 
 - name: 'Teardown hub cluster CUDN resources'
   hosts: localhost
