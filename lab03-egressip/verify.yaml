@@ -1,11 +1,10 @@
 ---
-# Lab 03 Verification: EgressIP and Dual-Spine ECMP demonstration.
+# Lab 03 Verification: EgressIP and pod identity demonstration.
 #
-# Four phases:
+# Three phases:
 #   Phase 1 - Default egress (node IP as source)
 #   Phase 2 - EgressIP applied (172.16.252.70 as source)
-#   Phase 3 - ECMP verification on c8000v-1
-#   Phase 4 - Dual-spine ECMP verification (both routers + FRR)
+#   Phase 3 - Cross-cluster identity (CUDN pod IP, EgressIP not applied)
 #
 # Prerequisites:
 #   ansible-playbook common/setup.yaml
@@ -75,49 +74,16 @@
       ansible.builtin.pause:
         seconds: 5
 
-    - name: 'Label hub namespace for privileged pod security'
-      kubernetes.core.k8s:
-        state: patched
-        api_version: v1
-        kind: Namespace
-        name: cudn-hub-ns
-        definition:
-          metadata:
-            labels:
-              pod-security.kubernetes.io/enforce: privileged
-
-    - name: 'Deploy test pod on hub CUDN'
-      kubernetes.core.k8s:
-        state: present
-        definition:
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: egress-test
-            namespace: cudn-hub-ns
-            labels:
-              app: cudn-test
-          spec:
-            containers:
-            - name: test
-              image: docker.io/nicolaka/netshoot:latest
-              command: ["/bin/sh", "-c", "sleep infinity"]
-              securityContext:
-                capabilities:
-                  add: ["NET_RAW"]
-
-    - name: 'Wait for test pod to be running'
+    - name: 'Verify test pod is running'
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Pod
         name: egress-test
         namespace: cudn-hub-ns
       register: __test_pod
-      until: >
-        __test_pod.resources | length > 0 and
-        __test_pod.resources[0].status.phase == 'Running'
-      retries: 30
-      delay: 10
+      failed_when: >
+        __test_pod.resources | length == 0 or
+        __test_pod.resources[0].status.phase != 'Running'
 
     - name: 'Get test pod placement'
       ansible.builtin.set_fact:
@@ -270,97 +236,8 @@
 
   tags: ['phase2']
 
-# === Phase 3: ECMP verification ===
-- name: 'Phase 3: Verify ECMP on c8000v'
-  hosts: c8000v
-  gather_facts: false
-  connection: ansible.netcommon.network_cli
-
-  vars_files:
-    - ../common/manifest/vars.yaml
-
-  vars:
-    ansible_network_os: cisco.ios.ios
-    ansible_host: "{{ c8000v_host }}"
-    ansible_user: "{{ c8000v_user }}"
-    ansible_password: "{{ c8000v_password | default(omit) }}"
-    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
-    ansible_paramiko_look_for_keys: false
-
-  tasks:
-    - name: 'Show ECMP routing for hub CUDN prefix'
-      ansible.netcommon.cli_command:
-        command: 'show ip route 10.100.0.0 255.255.0.0'
-      register: __ecmp_detail
-
-    - name: 'Display ECMP paths for 10.100.0.0/16'
-      ansible.builtin.debug:
-        msg:
-          - "With maximum-paths 3, the c8000v should show 3 equal-cost next-hops:"
-          - "  172.16.252.61 (hub-master-0)"
-          - "  172.16.252.62 (hub-master-1)"
-          - "  172.16.252.63 (hub-master-2)"
-          - "{{ __ecmp_detail.stdout_lines }}"
-
-    - name: 'Show BGP multipath status'
-      ansible.netcommon.cli_command:
-        command: 'show ip bgp 10.100.0.0/16'
-      register: __bgp_multipath
-
-    - name: 'Display BGP multipath'
-      ansible.builtin.debug:
-        var: __bgp_multipath.stdout_lines
-
-    - name: 'Show CEF load-sharing entries'
-      ansible.netcommon.cli_command:
-        command: 'show ip cef 10.100.0.0/16'
-      register: __cef_ecmp
-
-    - name: 'Display CEF ECMP'
-      ansible.builtin.debug:
-        var: __cef_ecmp.stdout_lines
-
-  tags: ['phase3']
-
-# === Phase 4: c8000v and FRR route verification ===
-- name: 'Phase 4: Verify c8000v BGP routes'
-  hosts: c8000v
-  gather_facts: false
-  connection: ansible.netcommon.network_cli
-
-  vars_files:
-    - ../common/manifest/vars.yaml
-
-  vars:
-    ansible_network_os: cisco.ios.ios
-    ansible_host: "{{ c8000v_host }}"
-    ansible_user: "{{ c8000v_user }}"
-    ansible_password: "{{ c8000v_password | default(omit) }}"
-    ansible_ssh_private_key_file: "{{ c8000v_ssh_key | default(omit) }}"
-    ansible_paramiko_look_for_keys: false
-
-  tasks:
-    - name: 'Show c8000v BGP summary'
-      ansible.netcommon.cli_command:
-        command: 'show ip bgp summary'
-      register: __bgp_summary
-
-    - name: 'Display c8000v BGP summary'
-      ansible.builtin.debug:
-        var: __bgp_summary.stdout_lines
-
-    - name: 'Show c8000v BGP routes'
-      ansible.netcommon.cli_command:
-        command: 'show ip bgp'
-      register: __bgp_routes
-
-    - name: 'Display c8000v BGP routes'
-      ansible.builtin.debug:
-        var: __bgp_routes.stdout_lines
-
-  tags: ['phase4']
-
-- name: 'Phase 4b: Verify FRR routes on hub'
+# === Phase 3: Cross-cluster identity ===
+- name: 'Phase 3: Deploy spoke test pod'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -369,31 +246,98 @@
     - ../common/manifest/vars.yaml
 
   environment:
-    KUBECONFIG: "{{ hub_kubeconfig }}"
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
 
   tasks:
-    - name: 'Get a hub FRR pod'
+    - name: 'Verify spoke test pod is running'
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Pod
-        namespace: openshift-frr-k8s
-        label_selectors:
-          - "app=frr-k8s"
-      register: __frr_pods
+        name: spoke-test
+        namespace: cudn-spoke-ns
+      register: __spoke_pod
+      failed_when: >
+        __spoke_pod.resources | length == 0 or
+        __spoke_pod.resources[0].status.phase != 'Running'
 
-    - name: 'Show BGP routes from hub FRR pod'
-      kubernetes.core.k8s_exec:
-        namespace: openshift-frr-k8s
-        pod: "{{ __frr_pods.resources[0].metadata.name }}"
-        container: frr
-        command: "vtysh -c 'show bgp ipv4 unicast'"
-      register: __frr_bgp_routes
+    - name: 'Get spoke test pod CUDN IP from annotation'
+      ansible.builtin.set_fact:
+        spoke_pod_ip: "{{ (__spoke_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-spoke-ns/spoke-network']['ip_address'] | regex_replace('/.*', '') }}"
 
-    - name: 'Hub FRR BGP routes (expect spoke 10.200.x.x prefixes)'
+    - name: 'Display spoke test pod CUDN IP'
       ansible.builtin.debug:
-        msg: "{{ __frr_bgp_routes.stdout_lines }}"
+        msg: "Spoke test pod CUDN IP: {{ spoke_pod_ip }}"
 
-  tags: ['phase4']
+  tags: ['phase3']
+
+- name: 'Phase 3b: Cross-cluster identity proof via tcpdump'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  tasks:
+    - name: 'Get hub test pod CUDN IP from annotation'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: egress-test
+        namespace: cudn-hub-ns
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_pod
+
+    - name: 'Extract hub pod CUDN IP'
+      ansible.builtin.set_fact:
+        hub_pod_cudn_ip: "{{ (__hub_pod.resources[0].metadata.annotations['k8s.ovn.org/pod-networks'] | from_json)['cudn-hub-ns/hub-network']['ip_address'] | regex_replace('/.*', '') }}"
+
+    - name: 'Display hub pod CUDN IP'
+      ansible.builtin.debug:
+        msg:
+          - "Hub pod CUDN IP: {{ hub_pod_cudn_ip }}"
+          - "EgressIP is still active (172.16.252.70) — but cross-cluster traffic should NOT use it"
+
+    - name: 'Cross-cluster tcpdump: prove source is CUDN IP, not EgressIP'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-spoke-ns
+        pod: spoke-test
+        container: test
+        command: >-
+          sh -c 'tcpdump -c 4 -nn -l -i any icmp 2>/dev/null &
+          TCPDUMP_PID=$!;
+          sleep 1;
+          ping -c 2 -W 5 {{ hub_pod_cudn_ip }};
+          wait $TCPDUMP_PID'
+      environment:
+        KUBECONFIG: "{{ spoke_kubeconfig }}"
+      register: __crosscluster_tcpdump
+      ignore_errors: true
+
+    - name: 'Display cross-cluster tcpdump (expect CUDN IPs, not 172.16.252.70)'
+      ansible.builtin.debug:
+        msg:
+          - "Cross-cluster traffic source/dest should be CUDN IPs (10.x.x.x),"
+          - "NOT the EgressIP (172.16.252.70):"
+          - ""
+          - "{{ __crosscluster_tcpdump.stdout_lines | default([]) }}"
+
+    - name: 'Verify hub -> spoke ping over CUDN (with EgressIP active)'
+      kubernetes.core.k8s_exec:
+        namespace: cudn-hub-ns
+        pod: egress-test
+        command: "ping -c 3 -W 5 {{ spoke_pod_ip }}"
+      environment:
+        KUBECONFIG: "{{ hub_kubeconfig }}"
+      register: __hub_to_spoke_ping
+      ignore_errors: true
+
+    - name: 'Display hub -> spoke cross-cluster ping'
+      ansible.builtin.debug:
+        msg: "{{ __hub_to_spoke_ping.stdout_lines | default(__hub_to_spoke_ping.stderr_lines) }}"
+
+  tags: ['phase3']
 
 # === Cleanup: remove ICMP logging ACL ===
 - name: 'Cleanup: Remove ICMP logging ACL from c8000v'
@@ -433,20 +377,19 @@
     - name: 'Summary'
       ansible.builtin.debug:
         msg:
-          - "=== Lab 03: EgressIP and Dual-Spine ECMP ==="
+          - "=== Lab 03: EgressIP and Pod Identity ==="
           - ""
-          - "1. DEFAULT EGRESS: Without EgressIP, pod egress traffic uses the"
-          - "   node IP as source (SNAT). Which node depends on pod scheduling."
+          - "1. DEFAULT IDENTITY: Without EgressIP, pod egress traffic uses the"
+          - "   node IP as source (SNAT). Identity changes with pod scheduling."
           - ""
-          - "2. EGRESSIP: With EgressIP CR applied, all egress from cudn-hub-ns"
-          - "   uses 172.16.252.70 as source IP, regardless of pod placement."
+          - "2. EGRESSIP IDENTITY: With EgressIP CR applied, all egress from"
+          - "   cudn-hub-ns uses 172.16.252.70 as source IP, regardless of"
+          - "   which node the pod runs on. Stable external identity."
           - ""
-          - "3. ECMP (single-router): With maximum-paths 3 on c8000v-1, return"
-          - "   traffic to 10.100.0.0/16 is load-balanced across all 3 hub nodes."
+          - "3. CROSS-CLUSTER IDENTITY: When hub pod communicates with spoke"
+          - "   pod over the CUDN BGP route, the source IP is the pod's CUDN"
+          - "   IP (10.100.x.x). EgressIP does NOT affect this traffic."
           - ""
-          - "4. DUAL-SPINE ECMP: Two c8000v routers (AS 64514, iBGP) provide"
-          - "   redundant paths. Each cluster node peers with both routers."
-          - "   FRR sees 2 equal-cost paths for cross-cluster traffic."
-          - ""
-          - "5. KEY INSIGHT: EgressIP affects external egress only."
-          - "   Cross-cluster CUDN traffic still uses the pod's CUDN IP."
+          - "TWO IDENTITY BOUNDARIES:"
+          - "  External (pod -> c8000v/beyond): controlled by EgressIP"
+          - "  Cross-cluster (hub <-> spoke CUDN): always the pod CUDN IP"

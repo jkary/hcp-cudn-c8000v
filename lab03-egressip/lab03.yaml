@@ -1,8 +1,8 @@
 ---
-# Lab 03: EgressIP and Dual-Spine ECMP Load Balancing
+# Lab 03: EgressIP and Pod Identity
 #
-# Topology: Two c8000v routers (AS 64514, iBGP) on separate L2 segments.
-# Each cluster node is dual-homed to both routers for ECMP.
+# Demonstrates EgressIP for stable pod identity on the single c8000v topology.
+# Three identity scenarios: default SNAT, EgressIP, and cross-cluster CUDN.
 #
 # Prerequisites:
 #   ansible-playbook common/setup.yaml
@@ -11,10 +11,8 @@
 #   ansible-playbook lab03-egressip/lab03.yaml
 #
 # Individual phases:
-#   ansible-playbook lab03-egressip/lab03.yaml -t nmstate
 #   ansible-playbook lab03-egressip/lab03.yaml -t hub
 #   ansible-playbook lab03-egressip/lab03.yaml -t spoke
-#   ansible-playbook lab03-egressip/lab03.yaml -t c8000v
 
 - name: 'Pre-check: Verify common setup is complete'
   hosts: localhost
@@ -146,6 +144,127 @@
 
   tags: ['hub']
 
+- name: 'Hub cluster - Apply EgressIP'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  vars:
+    lab_local_path: "{{ playbook_dir }}"
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Apply EgressIP CR'
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ lab_local_path }}/manifest/hub-egressip.yaml"
+      register: __egressip
+      until: __egressip is not failed
+      retries: 5
+      delay: 10
+
+    - name: 'Wait for EgressIP to be assigned'
+      kubernetes.core.k8s_info:
+        api_version: k8s.ovn.org/v1
+        kind: EgressIP
+        name: hub-egressip
+      register: __egressip_status
+      until: >
+        __egressip_status.resources | length > 0 and
+        __egressip_status.resources[0].get('status', {}).get('items', []) | length > 0
+      retries: 30
+      delay: 10
+      ignore_errors: true
+
+    - name: 'Display EgressIP assignment'
+      ansible.builtin.debug:
+        msg: "EgressIP assigned: {{ __egressip_status.resources[0].status }}"
+      when: >
+        __egressip_status is not failed and
+        __egressip_status.resources | default([]) | length > 0 and
+        __egressip_status.resources[0].status is defined
+
+  tags: ['hub']
+
+- name: 'Hub cluster - Deploy test pod'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ hub_kubeconfig }}"
+
+  tasks:
+    - name: 'Label hub namespace for privileged pod security'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-hub-ns
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+
+    - name: 'Delete existing hub test pod (if spec changed)'
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Pod
+        name: egress-test
+        namespace: cudn-hub-ns
+        wait: true
+
+    - name: 'Deploy test pod on hub CUDN'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: egress-test
+            namespace: cudn-hub-ns
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
+              securityContext:
+                capabilities:
+                  add: ["NET_RAW"]
+
+    - name: 'Wait for test pod to be running'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: egress-test
+        namespace: cudn-hub-ns
+      register: __test_pod
+      until: >
+        __test_pod.resources | length > 0 and
+        __test_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+
+    - name: 'Display test pod placement'
+      ansible.builtin.debug:
+        msg:
+          - "Test pod: {{ __test_pod.resources[0].metadata.name }}"
+          - "Node: {{ __test_pod.resources[0].spec.nodeName }}"
+          - "Host IP: {{ __test_pod.resources[0].status.hostIP }}"
+
+  tags: ['hub']
+
 - name: 'Spoke cluster - Create CUDN and BGP peering'
   hosts: localhost
   connection: local
@@ -191,3 +310,75 @@
 
   tags: ['spoke']
 
+- name: 'Spoke cluster - Deploy test pod'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - ../common/manifest/vars.yaml
+
+  environment:
+    KUBECONFIG: "{{ spoke_kubeconfig }}"
+
+  tasks:
+    - name: 'Label spoke namespace for privileged pod security'
+      kubernetes.core.k8s:
+        state: patched
+        api_version: v1
+        kind: Namespace
+        name: cudn-spoke-ns
+        definition:
+          metadata:
+            labels:
+              pod-security.kubernetes.io/enforce: privileged
+
+    - name: 'Delete existing spoke test pod (if spec changed)'
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Pod
+        name: spoke-test
+        namespace: cudn-spoke-ns
+        wait: true
+
+    - name: 'Deploy test pod on spoke CUDN'
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: spoke-test
+            namespace: cudn-spoke-ns
+            labels:
+              app: cudn-test
+          spec:
+            containers:
+            - name: test
+              image: docker.io/nicolaka/netshoot:latest
+              command: ["/bin/sh", "-c", "sleep infinity"]
+              securityContext:
+                capabilities:
+                  add: ["NET_RAW", "NET_ADMIN"]
+
+    - name: 'Wait for spoke test pod to be running'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: spoke-test
+        namespace: cudn-spoke-ns
+      register: __spoke_pod
+      until: >
+        __spoke_pod.resources | length > 0 and
+        __spoke_pod.resources[0].status.phase == 'Running'
+      retries: 30
+      delay: 10
+
+    - name: 'Display spoke test pod placement'
+      ansible.builtin.debug:
+        msg:
+          - "Test pod: {{ __spoke_pod.resources[0].metadata.name }}"
+          - "Node: {{ __spoke_pod.resources[0].spec.nodeName }}"
+
+  tags: ['spoke']
